@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pegamonstro/ai-tools-inference-lattice/pkg/latticeconfig"
 )
@@ -141,25 +142,20 @@ func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 		"stream":   false,
 	}
 
-	// Translate inference.v1 provider_params into Ollama-native options.
-	// reasoning_effort maps to a context-window size (larger context lets the
-	// model reason over more tokens); max_budget caps output length.
-	options := map[string]interface{}{}
-	if re, ok := req.Routing.ProviderParams["reasoning_effort"].(string); ok {
-		switch re {
-		case "low":
-			options["num_ctx"] = 2048
-		case "high":
-			options["num_ctx"] = 32768
-		default:
-			options["num_ctx"] = 8192
-		}
-	}
+	// max_budget caps output length (default 4096).
+	maxTokens := 4096
 	if mb, ok := req.Routing.ProviderParams["max_budget"].(float64); ok {
-		ollamaReq["max_tokens"] = int(mb)
+		maxTokens = int(mb)
+		ollamaReq["max_tokens"] = maxTokens
 	}
-	if len(options) > 0 {
-		ollamaReq["options"] = options
+
+	// Context window is sized dynamically to the prompt: short prompts keep a
+	// small KV cache (low memory), while large agent prompts grow it. reasoning_effort
+	// raises the ceiling, and a configurable cap prevents the 131072-token default
+	// from bloating memory.
+	ollamaReq["options"] = map[string]interface{}{
+		"num_ctx":       contextWindow(req.Messages, maxTokens, req.Routing.ProviderParams),
+		"kv_cache_type": kvCacheType,
 	}
 
 	body, _ := json.Marshal(ollamaReq)
@@ -167,7 +163,7 @@ func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 	httpReq, _ := http.NewRequest("POST", targetURL.String(), bytes.NewBuffer(body))
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -185,6 +181,77 @@ func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 	return &res, nil
 }
 
+// maxContext is the hard ceiling on num_ctx, configurable via
+// LATTICE_GATEWAY_MAX_CONTEXT. It exists so agents that legitimately need a
+// large window can raise it, while the default (32768) still caps the KV cache
+// well below Ollama's 131072-token default.
+var maxContext = maxContextTokens()
+
+func maxContextTokens() int {
+	if v := latticeconfig.Env("LATTICE_GATEWAY_MAX_CONTEXT", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 32768
+}
+
+// kvCacheType quantizes Ollama's KV cache (q8_0 vs the f16 default), roughly
+// halving context-window memory for a small recall-quality tradeoff.
+var kvCacheType = kvCacheTypeFromEnv()
+
+func kvCacheTypeFromEnv() string {
+	if v := latticeconfig.Env("LATTICE_GATEWAY_KV_CACHE", ""); v != "" {
+		return v
+	}
+	return "q8_0"
+}
+
+// contextWindow sizes the Ollama context to the prompt: it starts at 2048 and
+// doubles until it fits the prompt + output + margin. reasoning_effort sets the
+// ceiling (low=4096, default=8192, high=maxContext), so "high" lets an agent
+// reason over more tokens without forcing every request to pay for them.
+func contextWindow(messages []interface{}, maxTokens int, providerParams map[string]interface{}) int {
+	ceiling := 8192
+	if re, ok := providerParams["reasoning_effort"].(string); ok {
+		switch re {
+		case "low":
+			ceiling = 4096
+		case "high":
+			ceiling = maxContext
+		}
+	}
+
+	needed := estimateTokens(messages) + maxTokens + 256 // +margin for framing/overhead
+
+	ctx := 2048
+	for ctx < needed && ctx < ceiling {
+		ctx *= 2
+	}
+	if ctx > ceiling {
+		ctx = ceiling
+	}
+	if ctx > maxContext {
+		ctx = maxContext
+	}
+	return ctx
+}
+
+// estimateTokens gives a rough prompt size in tokens. Ollama exposes no stable
+// standalone tokenizer in its OpenAI-compat API, so we use ~4 chars/token — close
+// enough for sizing a context bucket, not for exact accounting.
+func estimateTokens(messages []interface{}) int {
+	total := 0
+	for _, m := range messages {
+		if mm, ok := m.(map[string]interface{}); ok {
+			if c, ok := mm["content"].(string); ok {
+				total += (len(c) + 3) / 4
+			}
+		}
+	}
+	return total
+}
+
 // --- Gateway Logic ---
 
 var (
@@ -192,6 +259,10 @@ var (
 	providerMutex sync.RWMutex
 	budgeter      *MemoryBudgeter
 	ollamaURL     string
+
+	// inferenceSlots serializes local inference so only one model is resident
+	// at a time; the memory budgeter can't stop two models loading concurrently.
+	inferenceSlots = make(chan struct{}, 1)
 )
 
 func handleInference(w http.ResponseWriter, r *http.Request) {
@@ -225,7 +296,10 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	inferenceSlots <- struct{}{}
 	res, err := provider.Execute(req)
+	<-inferenceSlots
+
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
