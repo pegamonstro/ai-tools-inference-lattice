@@ -14,10 +14,11 @@ import (
 )
 
 type Routing struct {
-	Privacy      string `json:"privacy"`
-	LatencyClass string `json:"latency_class"`
-	Parallelism  int    `json:"parallelism"`
-	RequestID    string `json:"request_id"`
+	Privacy         string                 `json:"privacy"`
+	LatencyClass    string                 `json:"latency_class"`
+	Parallelism     int                    `json:"parallelism"`
+	RequestID       string                 `json:"request_id"`
+	ProviderParams map[string]interface{} `json:"provider_params"`
 }
 
 type Request struct {
@@ -41,6 +42,20 @@ type Telemetry struct {
 	LatencyClass string  `json:"latency_class"`
 }
 
+type Provider struct {
+	ID           string
+	Endpoint     string
+	Capabilities []string
+	CostPerToken float64
+	RateLimit    int // req/min
+}
+
+type Gateway struct {
+	ID           string
+	Endpoint     string
+	Capabilities []string
+}
+
 type Task struct {
 	Req        Request
 	Decision   Decision
@@ -48,6 +63,38 @@ type Task struct {
 }
 
 var (
+	// Provider Registry: Now supports multiple providers for the same capability
+	providers = map[string]Provider{
+		"ollama-cloud-primary": {
+			ID:           "ollama-cloud-primary",
+			Endpoint:     "http://localhost:11434",
+			Capabilities: []string{"cloud"},
+			CostPerToken: 0.00001,
+			RateLimit:    100,
+		},
+		"ollama-cloud-secondary": {
+			ID:           "ollama-cloud-secondary",
+			Endpoint:     "http://localhost:11434", // Same endpoint, different account/key
+			Capabilities: []string{"cloud"},
+			CostPerToken: 0.000005,
+			RateLimit:    10,
+		},
+	}
+
+	// Gateway Registry: For local inference
+	gateways = map[string]Gateway{
+		"rpi4-internal": {
+			ID:           "rpi4-internal",
+			Endpoint:     "http://localhost:11434",
+			Capabilities: []string{"tiny"},
+		},
+		"mac-gateway": {
+			ID:           "mac-gateway",
+			Endpoint:     "http://localhost:8081",
+			Capabilities: []string{"local"},
+		},
+	}
+
 	capabilities = map[string]struct {
 		local string
 		cloud string
@@ -55,19 +102,13 @@ var (
 		"local-brain": {local: "granite4:3b", cloud: "gemma4:31b-cloud"},
 		"local-coder": {local: "hermes3:8b", cloud: "deepseek-v4-pro:cloud"},
 	}
-	macGatewayURL = "http://localhost:8081"
-	cloudURL      = "http://localhost:11434"
 
-	gatewayHealthy = true
+	gatewayHealthy = make(map[string]bool)
 	healthMutex    sync.RWMutex
 
 	highPriorityQueue = make(chan *Task, 100)
 	lowPriorityQueue   = make(chan *Task, 100)
 	cloudActive       int32
-
-	// Map to track active cloud requests for release
-	activeRequests = make(map[string]chan struct{})
-	activeMutex    sync.Mutex
 )
 
 func logTelemetry(t Telemetry) {
@@ -83,16 +124,17 @@ func logTelemetry(t Telemetry) {
 
 func monitorHealth() {
 	for {
-		resp, err := http.Get(macGatewayURL + "/health")
-		if err != nil || resp.StatusCode != http.StatusOK {
-			healthMutex.Lock()
-			gatewayHealthy = false
-			healthMutex.Unlock()
-			fmt.Println("Health check: Gateway UNHEALTHY")
-		} else {
-			healthMutex.Lock()
-			gatewayHealthy = true
-			healthMutex.Unlock()
+		for id, gw := range gateways {
+			resp, err := http.Get(gw.Endpoint + "/health")
+			if err != nil || (resp != nil && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound) {
+				healthMutex.Lock()
+				gatewayHealthy[id] = false
+				healthMutex.Unlock()
+			} else {
+				healthMutex.Lock()
+				gatewayHealthy[id] = true
+				healthMutex.Unlock()
+			}
 		}
 		time.Sleep(10 * time.Second)
 	}
@@ -100,7 +142,6 @@ func monitorHealth() {
 
 func dispatcher() {
 	semaphore := make(chan struct{}, 3)
-
 	for {
 		var task *Task
 		select {
@@ -119,62 +160,29 @@ func dispatcher() {
 				}
 			}
 		}
-
 		go func(t *Task) {
 			semaphore <- struct{}{}
 			atomic.AddInt32(&cloudActive, 1)
-
-			// Create a release channel for this request
-			relCh := make(chan struct{})
-			activeMutex.Lock()
-			activeRequests[t.Req.Routing.RequestID] = relCh
-			activeMutex.Unlock()
-
 			t.ResponseCh <- t.Decision
-
-			// Hold slot until release is called
-			<-relCh
-
-			activeMutex.Lock()
-			delete(activeRequests, t.Req.Routing.RequestID)
-			activeMutex.Unlock()
-
 			atomic.AddInt32(&cloudActive, -1)
 			<-semaphore
 		}(task)
 	}
 }
 
-func handleRelease(w http.ResponseWriter, r *http.Request) {
-	rid := r.URL.Query().Get("request_id")
-	if rid == "" {
-		http.Error(w, "missing request_id", http.StatusBadRequest)
-		return
-	}
-
-	activeMutex.Lock()
-	relCh, ok := activeRequests[rid]
-	activeMutex.Unlock()
-
-	if !ok {
-		http.Error(w, "request_id not found", http.StatusNotFound)
-		return
-	}
-
-	relCh <- struct{}{}
-	w.WriteHeader(http.StatusOK)
-}
-
 func handleStatus(w http.ResponseWriter, r *http.Request) {
 	healthMutex.RLock()
-	healthy := gatewayHealthy
+	status := make(map[string]bool)
+	for k, v := range gatewayHealthy {
+		status[k] = v
+	}
 	healthMutex.RUnlock()
 
-	status := map[string]interface{}{
-		"gateway_healthy": healthy,
-		"cloud_active":    atomic.LoadInt32(&cloudActive),
+	res := map[string]interface{}{
+		"gateways":    status,
+		"cloud_active": atomic.LoadInt32(&cloudActive),
 	}
-	json.NewEncoder(w).Encode(status)
+	json.NewEncoder(w).Encode(res)
 }
 
 func handleRoute(w http.ResponseWriter, r *http.Request) {
@@ -193,40 +201,76 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 	healthy := gatewayHealthy
 	healthMutex.RUnlock()
 
-	target := "local"
-	if req.Routing.LatencyClass == "interactive" && req.Routing.Privacy != "LOCAL_ONLY" {
-		target = "cloud"
+	// 1. Determine Target Capability
+	var requiredCap string
+	if req.Routing.Privacy == "LOCAL_ONLY" {
+		requiredCap = "local"
+	} else if req.Routing.LatencyClass == "interactive" {
+		requiredCap = "cloud"
+	} else {
+		requiredCap = "local"
 	}
 
-	if !healthy && target == "local" {
-		if req.Routing.Privacy == "LOCAL_ONLY" {
-			http.Error(w, "Gateway unhealthy and LOCAL_ONLY requested", http.StatusServiceUnavailable)
+	// 2. Routing Logic
+	var targetID, endpoint, modelName string
+
+	if requiredCap == "cloud" {
+		// Find the most efficient/budget-friendly provider
+		var bestProvider *Provider
+		minCost := 999999.9
+
+		for id, p := range providers {
+			for _, cap := range p.Capabilities {
+				if cap == "cloud" && p.CostPerToken < minCost {
+					minCost = p.CostPerToken
+					bestProvider = &p
+				}
+			}
+		}
+
+		if bestProvider != nil {
+			targetID = bestProvider.ID
+			endpoint = bestProvider.Endpoint
+			modelName = capabilities[req.Model].cloud
+		}
+	} else {
+		// Find a healthy gateway for 'local' or 'tiny'
+		found := false
+		for id, gw := range gateways {
+			if healthy[id] {
+				for _, cap := range gw.Capabilities {
+					if cap == "local" || (requiredCap == "local" && cap == "tiny") {
+						targetID = id
+						endpoint = gw.Endpoint
+						modelName = capabilities[req.Model].local
+						found = true
+						break
+					}
+				}
+			}
+			if found {
+				break
+			}
+		}
+
+		if !found {
+			http.Error(w, "No healthy local gateway found", http.StatusServiceUnavailable)
 			return
 		}
-		fmt.Println("  Gateway unhealthy, falling back to cloud")
-		target = "cloud"
 	}
 
-	cap, ok := capabilities[req.Model]
-	if !ok {
-		http.Error(w, "Unknown model alias", http.StatusBadRequest)
+	if targetID == "" {
+		http.Error(w, "No suitable provider found", http.StatusServiceUnavailable)
 		return
 	}
 
-	modelName := cap.local
-	endpoint := macGatewayURL
-	if target == "cloud" {
-		modelName = cap.cloud
-		endpoint = cloudURL
-	}
-
 	decision := Decision{
-		Target:    target,
-		Endpoint: endpoint,
+		Target:    targetID,
+		Endpoint:  endpoint,
 		ModelName: modelName,
 	}
 
-	if target == "cloud" {
+	if targetID == "rpi4-internal" && targetID != "mac-gateway" { // if it's cloud
 		respCh := make(chan Decision, 1)
 		task := &Task{
 			Req:        req,
@@ -239,14 +283,13 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 		} else {
 			lowPriorityQueue <- task
 		}
-
 		decision = <-respCh
 	}
 
 	logTelemetry(Telemetry{
 		RequestID:    req.Routing.RequestID,
 		DecisionTime: time.Since(t0).Seconds(),
-		Target:       target,
+		Target:       targetID,
 		Model:        modelName,
 		Privacy:      req.Routing.Privacy,
 		LatencyClass: req.Routing.LatencyClass,
@@ -260,7 +303,6 @@ func main() {
 	go dispatcher()
 	http.HandleFunc("/status", handleStatus)
 	http.HandleFunc("/route", handleRoute)
-	http.HandleFunc("/release", handleRelease)
 	fmt.Println("Lattice Control listening on :8082...")
 	log.Fatal(http.ListenAndServe(":8082", nil))
 }

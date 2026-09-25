@@ -27,7 +27,11 @@ The request is a standard OpenAI Chat Completion request, extended with a `routi
     "privacy": "LOCAL_ONLY" | "LOCAL_PREFERRED" | "CLOUD_ALLOWED",
     "latency_class": "interactive" | "batch",
     "parallelism": number, // 1 = single, >1 = fan-out (batch)
-    "request_id": "string" // UUID for tracing across Control/Gateway
+    "request_id": "string", // UUID for tracing across Control/Gateway
+    "provider_params": {
+      "reasoning_effort": "low" | "medium" | "high",
+      "max_budget": number
+    }
   },
   "stream": boolean,
   "max_tokens": number,

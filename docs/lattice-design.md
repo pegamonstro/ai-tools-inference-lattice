@@ -28,16 +28,13 @@ The router's job is to put latency-critical work on the scarce-fast resource and
 ## 2. Frozen topology
 
 ```
-RPi4  (user@rpi4)   ── Control plane. Policy, capability registry, lifecycle,
-                      health, fallback, observability, cloud-concurrency gate.
-                      Cloud-only client — no local inference of any kind (hardware too limited).
-Mac mac-gateway (this) ── Lattice Gateway. Ollama, provider adapters, concurrency.
-                      The ONLY local-inference host — all locals (LLM + embeddings) live here.
-RPi3              ── Security appliance (DNS sinkhole, honeypot, bastion).
-                      Outside the control plane. Inference client only.
+Control Plane (RPi4) ── Orchestrates routing based on capability.
+  │
+  ├── Gateway 1 (rpi4-internal) ── Local: Tiny / Cloud: Subscription
+  └── Gateway 2 (Mac mac-gateway)    ── Local: Substantive LLMs
 ```
 
-Invariant: **the RPi4 decides; the Mac executes.** Neither is allowed to drift into the other's role.
+Invariant: **the Control plane decides; the Gateways execute.** Any node can act as a Gateway if it provides the necessary capabilities.
 
 ---
 
@@ -148,12 +145,28 @@ Phases 0–7 are the core. Phases 8–10 are explicitly deferred and gated on ob
 - **State: SQLite** (Hermes already uses it) or append-only log. Deferred to Phase 2.
 - **FOSS routers: rejected for now** (Phase 8). LiteLLM needs Postgres+Redis; OmniRoute has security red flags (hardcoded JWT secret, single maintainer, Socket.dev malware flag); OpenRouter is cloud. All violate at least one anti-drift rule.
 
----
+## 10. Provider Orchestration & Budgeting
 
-## 9. Open questions
+As the Lattice grows to support multiple cloud providers and multiple local gateways, the Control plane evolves from a simple router to an **Orchestrator**.
 
-1. ~~Local latency truth~~ — resolved in Phase 0: ~10 tok/s warm; cloud = interactive default.
-2. **State store** — SQLite vs append-only log (Phase 2).
-3. **Concurrency-gate policy** — queue vs degrade threshold, and whether interactive cloud requests preempt queued batch (Phase 2).
-4. **Authn/z between hosts** — mTLS vs tailnet-only trust (Phase 2/4).
-5. ~~rpi4 small models~~ — resolved 2026-09-25: no local inference on rpi4 at all; embeddings consolidate to the Mac (Phase 3).
+### 10.1 Multi-Provider Management
+Instead of a single cloud endpoint, the Control plane manages a **Provider Registry**. Each provider is associated with:
+- **Rate Limits**: (e.g., 10 req/min, 100k tokens/day).
+- **Cost Profile**: (e.g., $0.01 / 1M tokens).
+- **Capability Set**: (e.g., `supports_reasoning: true`, `supports_vision: false`).
+
+### 10.2 Optimization Logic
+The Control plane selects the target based on the following precedence:
+1. **Privacy Gate**: `LOCAL_ONLY` $\rightarrow$ Local only.
+2. **Capability Match**: Does the provider support the requested `reasoning_effort` or `vision`?
+3. **Budget/Rate Check**: Is the cheapest provider currently under its rate limit?
+4. **Latency Class**: If `interactive`, prioritize the provider with the lowest measured latency, even if slightly more expensive.
+
+### 10.3 Parameter Translation
+The Gateway acts as a translation layer. It takes the `provider_params` from the `inference.v1` request and maps them to the specific API of the chosen provider.
+- `reasoning_effort: "high"` $\rightarrow$ (DeepSeek API) `reasoning_effort: "high"`.
+- `reasoning_effort: "high"` $\rightarrow$ (Ollama) `num_ctx: 32768` + specific prompt wrapping.
+
+### 10.4 Feedback Loop
+The Gateway reports the actual token usage and wall-clock time back to the Control plane via telemetry. This allows the Lattice to dynamically update its "cost per token" and "latency per model" maps, ensuring routing decisions are based on real-time data, not static assumptions.
+
