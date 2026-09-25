@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+
+	"github.com/pegamonstro/ai-tools-inference-lattice/pkg/latticeconfig"
 )
 
 type Routing struct {
@@ -29,7 +31,7 @@ func main() {
 	}
 
 	prompt := os.Args[1]
-	frontendURL := "http://localhost:8080/v1/chat/completions"
+	frontendURL := latticeconfig.Env("LATTICE_FRONTEND_URL", "http://localhost:8080/v1/chat/completions")
 
 	reqBody := Request{
 		Model: "local-brain",

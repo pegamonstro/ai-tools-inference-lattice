@@ -7,3 +7,4 @@
 /lattice-stats
 *.jsonl
 *.py
+/bin/

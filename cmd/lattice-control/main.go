@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/pegamonstro/ai-tools-inference-lattice/pkg/latticeconfig"
 )
 
 type Routing struct {
@@ -64,37 +66,38 @@ type Task struct {
 
 var (
 	// Provider Registry: Now supports multiple providers for the same capability
-	providers = map[string]Provider{
-		"ollama-cloud-primary": {
-			ID:           "ollama-cloud-primary",
-			Endpoint:     "http://localhost:11434",
-			Capabilities: []string{"cloud"},
-			CostPerToken: 0.00001,
-			RateLimit:    100,
-		},
-		"ollama-cloud-secondary": {
-			ID:           "ollama-cloud-secondary",
-			Endpoint:     "http://localhost:11434", // Same endpoint, different account/key
-			Capabilities: []string{"cloud"},
-			CostPerToken: 0.000005,
-			RateLimit:    10,
-		},
-	}
-
+	providers = map[string]Provider{}
 	// Gateway Registry: For local inference
-	gateways = map[string]Gateway{
-		"rpi4-internal": {
-			ID:           "rpi4-internal",
-			Endpoint:     "http://localhost:11434",
-			Capabilities: []string{"tiny"},
-		},
-		"mac-gateway": {
-			ID:           "mac-gateway",
-			Endpoint:     "http://localhost:8081",
-			Capabilities: []string{"local"},
-		},
+	gateways = map[string]Gateway{}
+)
+
+func init() {
+	ollamaURL := latticeconfig.Env("LATTICE_OLLAMA_URL", "http://localhost:11434")
+	gatewayURL := latticeconfig.Env("LATTICE_GATEWAY_URL", "http://localhost:8081")
+
+	providers["ollama-cloud-primary"] = Provider{
+		ID:           "ollama-cloud-primary",
+		Endpoint:     ollamaURL,
+		Capabilities: []string{"cloud"},
+		CostPerToken: 0.00001,
+		RateLimit:    100,
+	}
+	providers["ollama-cloud-secondary"] = Provider{
+		ID:           "ollama-cloud-secondary",
+		Endpoint:     ollamaURL, // Same endpoint, different account/key
+		Capabilities: []string{"cloud"},
+		CostPerToken: 0.000005,
+		RateLimit:    10,
 	}
 
+	gateways["mac-gateway"] = Gateway{
+		ID:           "mac-gateway",
+		Endpoint:     gatewayURL,
+		Capabilities: []string{"local"},
+	}
+}
+
+var (
 	capabilities = map[string]struct {
 		local string
 		cloud string
@@ -305,6 +308,7 @@ func main() {
 	go dispatcher()
 	http.HandleFunc("/status", handleStatus)
 	http.HandleFunc("/route", handleRoute)
-	fmt.Println("Lattice Control listening on :8082...")
-	log.Fatal(http.ListenAndServe(":8082", nil))
+	addr := latticeconfig.Env("LATTICE_CONTROL_ADDR", ":8082")
+	fmt.Printf("Lattice Control listening on %s...\n", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
 }

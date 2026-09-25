@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"os"
 	"time"
+
+	"github.com/pegamonstro/ai-tools-inference-lattice/pkg/latticeconfig"
 )
 
 type Routing struct {
@@ -40,9 +42,7 @@ type Telemetry struct {
 	Target        string  `json:"target"`
 }
 
-var (
-	controlURL = "http://127.0.0.1:8082/route"
-)
+var controlURL = latticeconfig.Env("LATTICE_CONTROL_URL", "http://127.0.0.1:8082/route")
 
 func logTelemetry(t Telemetry) {
 	f, err := os.OpenFile("telemetry-frontend.jsonl", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -75,6 +75,14 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		// Propagate the control plane's error status and message (e.g. 503
+		// "No healthy local gateway found") instead of masking it as a 500.
+		body, _ := io.ReadAll(resp.Body)
+		http.Error(w, "Control plane: "+string(body), resp.StatusCode)
+		return
+	}
 
 	var decision Decision
 	if err := json.NewDecoder(resp.Body).Decode(&decision); err != nil {
@@ -123,6 +131,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	http.HandleFunc("/v1/chat/completions", handleChat)
-	fmt.Println("Lattice Frontend listening on :8080...")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	addr := latticeconfig.Env("LATTICE_FRONTEND_ADDR", ":8080")
+	fmt.Printf("Lattice Frontend listening on %s...\n", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
 }

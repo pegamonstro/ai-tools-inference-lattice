@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/pegamonstro/ai-tools-inference-lattice/pkg/latticeconfig"
 )
 
 type Routing struct {
@@ -59,6 +61,7 @@ type Usage struct {
 type MemoryBudgeter struct {
 	maxRAMBytes uint64
 	safeMargin  uint64 // bytes to keep free to avoid swap
+	pageSize    uint64
 }
 
 func NewMemoryBudgeter() *MemoryBudgeter {
@@ -66,9 +69,18 @@ func NewMemoryBudgeter() *MemoryBudgeter {
 	out, _ := exec.Command("sysctl", "-n", "hw.memsize").Output()
 	mem, _ := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64)
 
+	// Get the VM page size (4096 on Intel, 16384 on Apple Silicon) so the
+	// vm_stat page counts below are converted to bytes correctly.
+	pageOut, _ := exec.Command("sysctl", "-n", "vm.pagesize").Output()
+	pageSize, _ := strconv.ParseUint(strings.TrimSpace(string(pageOut)), 10, 64)
+	if pageSize == 0 {
+		pageSize = 4096
+	}
+
 	return &MemoryBudgeter{
 		maxRAMBytes: mem,
 		safeMargin:  4 * 1024 * 1024 * 1024, // Keep 4GB free
+		pageSize:    pageSize,
 	}
 }
 
@@ -79,7 +91,7 @@ func (mb *MemoryBudgeter) CanAccommodate() bool {
 		return false
 	}
 
-	// vm_stat outputs pages. Page size is usually 4096 bytes on Mac.
+	// vm_stat outputs page counts; multiply by the actual page size.
 	// We look for "Pages free" and "Pages inactive"
 	lines := strings.Split(string(out), "\n")
 	var freePages, inactivePages uint64
@@ -92,7 +104,7 @@ func (mb *MemoryBudgeter) CanAccommodate() bool {
 		}
 	}
 
-	availableBytes := (freePages + inactivePages) * 4096
+	availableBytes := (freePages + inactivePages) * mb.pageSize
 	return availableBytes > mb.safeMargin
 }
 
@@ -170,6 +182,7 @@ var (
 	providers     = make(map[string]Provider)
 	providerMutex sync.RWMutex
 	budgeter      *MemoryBudgeter
+	ollamaURL     string
 )
 
 func handleInference(w http.ResponseWriter, r *http.Request) {
@@ -219,7 +232,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := http.Get("http://localhost:11434/api/tags")
+	resp, err := http.Get(ollamaURL + "/api/tags")
 	if err != nil || resp.StatusCode != http.StatusOK {
 		http.Error(w, "Ollama unhealthy", http.StatusServiceUnavailable)
 		return
@@ -230,13 +243,15 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	budgeter = NewMemoryBudgeter()
+	ollamaURL = latticeconfig.Env("LATTICE_OLLAMA_URL", "http://localhost:11434")
 
 	providerMutex.Lock()
-	providers["ollama"] = &OllamaProvider{Endpoint: "http://localhost:11434"}
+	providers["ollama"] = &OllamaProvider{Endpoint: ollamaURL}
 	providerMutex.Unlock()
 
 	http.HandleFunc("/v1/chat/completions", handleInference)
 	http.HandleFunc("/health", handleHealth)
-	fmt.Printf("Lattice Gateway listening on :8081 (Dynamic Memory Budgeting active)\n")
-	log.Fatal(http.ListenAndServe(":8081", nil))
+	addr := latticeconfig.Env("LATTICE_GATEWAY_ADDR", ":8081")
+	fmt.Printf("Lattice Gateway listening on %s (Dynamic Memory Budgeting active)\n", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
 }
