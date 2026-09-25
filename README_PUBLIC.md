@@ -34,3 +34,7 @@ Lattice extends the OpenAI API by adding a `routing` object to requests:
   }
 }
 ```
+
+---
+
+Authored by [pegamonstro](https://github.com/pegamonstro) — The Bikini Club. Licensed under the [Apache License 2.0](LICENSE).

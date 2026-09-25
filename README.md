@@ -1,5 +1,17 @@
 # Lattice — Inference Lattice
 
+```
+██╗      █████╗ ████████╗████████╗██╗ ██████╗███████╗
+██║     ██╔══██╗╚══██╔══╝╚══██╔══╝██║██╔════╝██╔════╝
+██║     ███████║   ██║      ██║   ██║██║     █████╗
+██║     ██╔══██║   ██║      ██║   ██║██║     ██╔══╝
+███████╗██║  ██║   ██║      ██║   ██║╚██████╗███████╗
+╚══════╝╚═╝  ╚═╝   ╚═╝      ╚═╝   ╚═╝ ╚═════╝╚══════╝
+
+          I N F E R E N C E   L A T T I C E
+          > sovereignty over speed
+```
+
 A lightweight distributed inference **control and execution** system for a three-host homelab. It separates the *decision* of what inference should happen (control plane) from the *mechanism* that performs it (gateway), and schedules work across two asymmetric resources: a fast-but-scarce cloud subscription and a slow-but-free local LLM.
 
 ## Topology
@@ -24,3 +36,7 @@ Routing is a function of `privacy` (LOCAL_ONLY / LOCAL_PREFERRED / CLOUD_ALLOWED
 - [docs/baseline.md](docs/baseline.md) — Phase 0 baseline of the three hosts + local-latency measurement.
 - [docs/prompts/phase-0-bootstrap.md](docs/prompts/phase-0-bootstrap.md) — the Phase 0 autonomous prompt.
 - `LLM INFERENCE ROUTING FOR HOMELAB/` — the original design conversation transcript (source of truth).
+
+---
+
+Authored by [pegamonstro](https://github.com/pegamonstro) — The Bikini Club. Licensed under the [Apache License 2.0](LICENSE).
