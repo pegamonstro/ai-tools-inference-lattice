@@ -1,7 +1,7 @@
 # Spec: Advanced Scheduling (Phase 9)
 
 **Status:** Draft
-**Host:** RPi4 (`user@rpi4`)
+**Host:** RPi4
 
 Lattice must ensure that high-priority interactive requests are not blocked by large batch workloads. This requires a priority-aware scheduler in the Control plane.
 

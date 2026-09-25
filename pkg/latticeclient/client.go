@@ -24,10 +24,11 @@ const (
 )
 
 type Routing struct {
-	Privacy      PrivacyLevel `json:"privacy"`
-	LatencyClass LatencyClass `json:"latency_class"`
-	Parallelism  int          `json:"parallelism"`
-	RequestID    string       `json:"request_id"`
+	Privacy        PrivacyLevel           `json:"privacy"`
+	LatencyClass   LatencyClass           `json:"latency_class"`
+	Parallelism    int                    `json:"parallelism"`
+	RequestID      string                 `json:"request_id"`
+	ProviderParams map[string]interface{} `json:"provider_params"`
 }
 
 type Request struct {

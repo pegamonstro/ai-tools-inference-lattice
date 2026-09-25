@@ -15,10 +15,11 @@ import (
 )
 
 type Routing struct {
-	Privacy      string `json:"privacy"`
-	LatencyClass string `json:"latency_class"`
-	Parallelism  int    `json:"parallelism"`
-	RequestID    string `json:"request_id"`
+	Privacy        string                 `json:"privacy"`
+	LatencyClass   string                 `json:"latency_class"`
+	Parallelism    int                    `json:"parallelism"`
+	RequestID      string                 `json:"request_id"`
+	ProviderParams map[string]interface{} `json:"provider_params"`
 }
 
 type Request struct {
@@ -118,6 +119,28 @@ func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 		"messages": req.Messages,
 		"stream":   false,
 	}
+
+	// Translate inference.v1 provider_params into Ollama-native options.
+	// reasoning_effort maps to a context-window size (larger context lets the
+	// model reason over more tokens); max_budget caps output length.
+	options := map[string]interface{}{}
+	if re, ok := req.Routing.ProviderParams["reasoning_effort"].(string); ok {
+		switch re {
+		case "low":
+			options["num_ctx"] = 2048
+		case "high":
+			options["num_ctx"] = 32768
+		default:
+			options["num_ctx"] = 8192
+		}
+	}
+	if mb, ok := req.Routing.ProviderParams["max_budget"].(float64); ok {
+		ollamaReq["max_tokens"] = int(mb)
+	}
+	if len(options) > 0 {
+		ollamaReq["options"] = options
+	}
+
 	body, _ := json.Marshal(ollamaReq)
 
 	httpReq, _ := http.NewRequest("POST", targetURL.String(), bytes.NewBuffer(body))

@@ -1,7 +1,7 @@
 # Spec: Lattice Control (Phase 2)
 
 **Status:** Draft
-**Host:** RPi4 (`user@rpi4`)
+**Host:** RPi4
 
 The Lattice Control plane is the intelligence of the system. It does not execute inference; it performs the **routing decision**.
 
@@ -31,11 +31,11 @@ When a request arrives at the Control plane:
 
 ## 3. Capability Registry
 
-A simple map of model aliases to providers:
-- `local-brain` $\rightarrow$ Mac Gateway (`granite4:3b`)
-- `cloud-brain` $\rightarrow$ rpi4 Cloud (`gemma4:31b-cloud`)
-- `local-coder` $\rightarrow$ Mac Gateway (`hermes3:8b`)
-- `cloud-coder` $\rightarrow$ rpi4 Cloud (`deepseek-v4-pro:cloud`)
+A map of model *aliases* (capabilities) to their local and cloud model names:
+- `local-brain` $\rightarrow$ `{local: granite4:3b, cloud: gemma4:31b-cloud}`
+- `local-coder` $\rightarrow$ `{local: hermes3:8b, cloud: deepseek-v4-pro:cloud}`
+
+The alias selects a capability (brain vs coder); the routing decision then picks the local or cloud model name for that capability.
 
 ## 4. Concurrency Management
 

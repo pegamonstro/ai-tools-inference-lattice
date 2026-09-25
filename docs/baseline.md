@@ -6,9 +6,9 @@ Recorded 2026-09-25. Read-only inspection; nothing changed on any host.
 
 | Host | OS | Arch | Kernel | Toolchains |
 |---|---|---|---|---|
-| rpi4 (`user@rpi4`) | Debian 13 (trixie) | aarch64 | 6.18.50+rpt-rpi-v8 | Go 1.24.4, Python 3.13.5, gcc 14.2.0 — **no Rust/Node** |
-| Mac mac-gateway (this machine) | macOS | arm64 (Apple M1) | — | `ollama` at `/usr/local/bin/ollama` |
-| rpi3 (`user@rpi3`) | Alpine Linux v3.24.2 | aarch64 | — | busybox/OpenRC — **no Ollama** |
+| rpi4 | Debian 13 (trixie) | aarch64 | 6.18.50+rpt-rpi-v8 | Go 1.24.4, Python 3.13.5, gcc 14.2.0 — **no Rust/Node** |
+| Mac (this machine) | macOS | arm64 (Apple M1) | — | `ollama` at `/usr/local/bin/ollama` |
+| rpi3 | Alpine Linux v3.24.2 | aarch64 | — | busybox/OpenRC — **no Ollama** |
 
 ## Inference surface (model-tier classification)
 
@@ -18,7 +18,7 @@ Recorded 2026-09-25. Read-only inspection; nothing changed on any host.
 
 Hermes default cloud model: `gemma4:31b-cloud` (provider `ollama-launch`, api `http://127.0.0.1:11434/v1`).
 
-### Mac-local LLM tier — mac-gateway Ollama (slow, free, unlimited parallel)
+### Mac-local LLM tier — Ollama (slow, free, unlimited parallel)
 
 `granite4:3b` (main local, 2.1 GB), `gemma3:4b` (3.3 GB), `command-r7b:7b` (5.1 GB), `hermes3:8b` (4.7 GB).
 
@@ -30,7 +30,7 @@ Hermes default cloud model: `gemma4:31b-cloud` (provider `ollama-launch`, api `h
 
 No Ollama, no local inference — confirmed. It runs the homelab's service surface (mail 993/995/465/143/110, DNS 53, Postgres 5432, MySQL 3306, Redis 6379, memcached 11211, Samba 445, VNC 5900, ssh 2222). "Security appliance" = it never computes inference; it is not a bare box.
 
-## Local-latency measurement (Mac mac-gateway, granite4:3b primary)
+## Local-latency measurement (Mac, granite4:3b primary)
 
 | Model | State | Prompt | Wall | completion_tokens | tok/s |
 |---|---|---|---|---|---|

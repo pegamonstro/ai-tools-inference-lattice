@@ -10,8 +10,8 @@ You are executing **Phase 0** of **Lattice** (Inference Lattice) — a lightweig
 
 The frozen architecture:
 
-- **RPi4** (`user@rpi4`, Debian 13 trixie, aarch64) = Control plane. Decides *what* inference should happen. No substantive local LLM.
-- **Mac mac-gateway** (Apple M1, 16 GB) = Lattice Gateway. The ONLY substantive local-LLM host.
+- **RPi4** (Debian 13 trixie, aarch64) = Control plane. Decides *what* inference should happen. No substantive local LLM.
+- **Mac** (Apple M1, 16 GB) = Lattice Gateway. The ONLY substantive local-LLM host.
 - **RPi3** (Alpine 3.24, OpenRC) = security appliance. Outside the control plane.
 
 Anti-drift rules you must respect (10): (1) Ollama is an implementation detail; (2) the RPi4 decides, the Mac executes; (3) RPi3 stays a security appliance; (4) one canonical protocol; (5) no speculative infrastructure (no K8s/Redis/Kafka/Postgres-for-routing); (6) no premature provider abstraction; (7) deterministic infrastructure; (8) every phase has an exit test; (9) preserve reversibility; (10) complexity must earn its existence.
@@ -36,9 +36,9 @@ Working directory is `/Users/archcore/Projects/LLM-router`. Do the following, an
 
 For each host, record in `docs/baseline.md`:
 
-- **rpi4** — SSH `user@rpi4`. Record: OS + version (`cat /etc/os-release`), arch (`uname -m`), kernel (`uname -r`), toolchains (`go version`, `python3 --version`, presence of rustc/node), and the full inference surface: `curl -s http://127.0.0.1:11434/api/tags` (list every model with its `:cloud` or local suffix), and the Hermes provider config (`~/.hermes/config.yaml` `providers:` section only — do not print secrets).
-- **Mac mac-gateway** — local machine. Record: `uname -m`, `sysctl -n machdep.cpu.brand_string`, `sysctl -n hw.memsize`, `ollama list` (every model + size).
-- **rpi3** — SSH `user@rpi3` (or `user@rpi3` per your `~/.ssh/config`). Record: OS + version, arch, and confirm it is NOT running any local LLM inference (it must remain a security appliance).
+- **rpi4** — Record: OS + version (`cat /etc/os-release`), arch (`uname -m`), kernel (`uname -r`), toolchains (`go version`, `python3 --version`, presence of rustc/node), and the full inference surface: `curl -s http://127.0.0.1:11434/api/tags` (list every model with its `:cloud` or local suffix), and the Hermes provider config (`~/.hermes/config.yaml` `providers:` section only — do not print secrets).
+- **Mac** — local machine. Record: `uname -m`, `sysctl -n machdep.cpu.brand_string`, `sysctl -n hw.memsize`, `ollama list` (every model + size).
+- **rpi3** — Record: OS + version, arch, and confirm it is NOT running any local LLM inference (it must remain a security appliance).
 
 Classify every model you find into one of the three resource tiers: **cloud** (`:cloud` / subscription), **Mac-local LLM**, **tiny/embedding**.
 

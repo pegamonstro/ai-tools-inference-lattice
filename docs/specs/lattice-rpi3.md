@@ -1,7 +1,7 @@
 # Spec: RPi3 Integration (Phase 6)
 
 **Status:** Draft
-**Host:** RPi3 (`user@rpi3`)
+**Host:** RPi3
 
 The RPi3 is the network's security bastion. It must have access to the Lattice's inference capabilities without compromising its status as a security appliance (i.e., it does not run the control plane or the gateway).
 

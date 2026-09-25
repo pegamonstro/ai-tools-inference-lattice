@@ -1,7 +1,7 @@
 # Spec: Lattice Gateway (Phase 3)
 
 **Status:** Draft
-**Host:** Mac mac-gateway (Apple M1 16GB)
+**Host:** Mac (Apple M1 16GB)
 
 The Lattice Gateway is the execution arm for all local inference. It translates `inference.v1` requests into Ollama calls and manages the local hardware resources to protect the system's health.
 

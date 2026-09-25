@@ -3,7 +3,7 @@
 ## 1. System Design
 Lattice implements a "Control Plane / Data Plane" split.
 - **Control Plane**: Stateless routing logic. Maps (Model Alias + Metadata) $\rightarrow$ (Endpoint + Model Name).
-- **Data Plane**: The Gateway. Handles the actual HTTP proxying to Ollama and manages the `localSemaphore` to prevent swap thrashing.
+- **Data Plane**: The Gateway. Handles the actual HTTP proxying to Ollama and uses dynamic memory budgeting (`MemoryBudgeter`) to prevent swap thrashing.
 
 ## 2. Hardware Mapping
 - **Control Host**: RPi4 (Debian 13). Port `:8082`.

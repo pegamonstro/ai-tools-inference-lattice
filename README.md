@@ -6,8 +6,8 @@ A lightweight distributed inference **control and execution** system for a three
 
 | Host | Role | Inference |
 |---|---|---|
-| **RPi4** (`user@rpi4`, Debian 13, aarch64) | Control plane — policy, capability, health, fallback, concurrency gate | Cloud-only client |
-| **Mac mac-gateway** (Apple M1, 16 GB) | Lattice Gateway — the ONLY substantive local-LLM host | `granite4:3b` (main), `gemma3:4b`, `command-r7b:7b`, `hermes3:8b` |
+| **RPi4** (Debian 13, aarch64) | Control plane — policy, capability, health, fallback, concurrency gate | Cloud-only client |
+| **Mac** (Apple M1, 16 GB) | Lattice Gateway — the ONLY substantive local-LLM host | `granite4:3b` (main), `gemma3:4b`, `command-r7b:7b`, `hermes3:8b` |
 | **RPi3** (Alpine 3.24, OpenRC) | Security appliance + homelab services | Inference client only; never computes local models |
 
 ## Routing model
@@ -16,7 +16,7 @@ Routing is a function of `privacy` (LOCAL_ONLY / LOCAL_PREFERRED / CLOUD_ALLOWED
 
 ## Phases
 
-0 charter/repo/baseline → 1 `inference.v1` protocol → 2 RPi4 Control → 3 Mac Gateway → 4 E2E integration → 5 failure/fallback → 6 RPi3 integration → 7 observability/hardening → 8 provider abstraction *(deferred)* → 9 advanced scheduling *(deferred)* → 10 Lattice 2.x.
+0 charter/repo/baseline → 1 `inference.v1` protocol → 2 RPi4 Control → 3 Mac Gateway → 4 E2E integration → 5 failure/fallback → 6 RPi3 integration *(out of scope)* → 7 observability/hardening → 8 provider abstraction → 9 advanced scheduling → 10 Lattice 2.x.
 
 ## Documents
 

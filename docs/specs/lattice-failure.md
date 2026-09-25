@@ -1,7 +1,7 @@
 # Spec: Lattice Failure & Fallback (Phase 5)
 
 **Status:** Draft
-**Host:** RPi4 (`user@rpi4`)
+**Host:** RPi4
 
 Lattice must be robust. The "Lattice" should not be a single point of failure, and it must strictly adhere to privacy constraints even during outages.
 
@@ -9,9 +9,9 @@ Lattice must be robust. The "Lattice" should not be a single point of failure, a
 
 The Control plane must track the health of the Mac Gateway.
 
-- **Active Probe**: Control plane pings `/health` on the Gateway every 30s.
+- **Active Probe**: Control plane pings `/health` on the Gateway every 10s.
 - **Passive Probe**: Every failed request to the Gateway increments a failure counter.
-- **Circuit Breaker**: If failure rate > 20% over 1 minute $\rightarrow$ mark Gateway as UNHEALTHY.
+- **Circuit Breaker** *(not yet implemented)*: planned — if failure rate > 20% over 1 minute, mark the Gateway UNHEALTHY. The current implementation relies on the active health probe only.
 
 ## 2. Fallback Logic
 

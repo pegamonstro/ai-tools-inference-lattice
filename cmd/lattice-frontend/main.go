@@ -14,10 +14,11 @@ import (
 )
 
 type Routing struct {
-	Privacy      string `json:"privacy"`
-	LatencyClass string `json:"latency_class"`
-	Parallelism  int    `json:"parallelism"`
-	RequestID    string `json:"request_id"`
+	Privacy        string                 `json:"privacy"`
+	LatencyClass   string                 `json:"latency_class"`
+	Parallelism    int                    `json:"parallelism"`
+	RequestID      string                 `json:"request_id"`
+	ProviderParams map[string]interface{} `json:"provider_params"`
 }
 
 type Request struct {
@@ -87,6 +88,15 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	proxyBody := make(map[string]interface{})
 	proxyBody["model"] = decision.ModelName
 	proxyBody["messages"] = req.Messages
+
+	// Forward provider_params to the local gateway (the translation layer).
+	// Cloud targets speak plain OpenAI and reject the routing envelope, so
+	// provider_params are only forwarded on the local path.
+	if req.Routing.ProviderParams != nil && decision.Target == "mac-gateway" {
+		proxyBody["routing"] = map[string]interface{}{
+			"provider_params": req.Routing.ProviderParams,
+		}
+	}
 	finalBodyBytes, _ := json.Marshal(proxyBody)
 
 	// 3. Proxy to Target

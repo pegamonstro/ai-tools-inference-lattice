@@ -1,7 +1,7 @@
 # Spec: Provider Abstraction (Phase 8)
 
 **Status:** Draft
-**Host:** Mac mac-gateway (Lattice Gateway)
+**Host:** Mac (Lattice Gateway)
 
 Currently, the Lattice Gateway is a direct proxy to Ollama. Phase 8 introduces a provider abstraction layer, allowing the Gateway to route requests to different inference engines (e.g., Ollama, vLLM, TGI) without changing the `inference.v1` protocol.
 

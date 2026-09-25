@@ -1,7 +1,7 @@
 # Spec: Lattice Frontend (Phase 4)
 
 **Status:** Draft
-**Host:** RPi4 (`user@rpi4`)
+**Host:** RPi4
 
 The Lattice Frontend is the single entry point for all inference requests in the homelab. It hides the complexity of the routing decision and the target execution from the client.
 

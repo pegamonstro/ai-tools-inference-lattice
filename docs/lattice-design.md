@@ -31,7 +31,7 @@ The router's job is to put latency-critical work on the scarce-fast resource and
 Control Plane (RPi4) ── Orchestrates routing based on capability.
   │
   ├── Gateway 1 (rpi4-internal) ── Local: Tiny / Cloud: Subscription
-  └── Gateway 2 (Mac mac-gateway)    ── Local: Substantive LLMs
+  └── Gateway 2 (Mac)          ── Local: Substantive LLMs
 ```
 
 Invariant: **the Control plane decides; the Gateways execute.** Any node can act as a Gateway if it provides the necessary capabilities.
@@ -41,7 +41,7 @@ Invariant: **the Control plane decides; the Gateways execute.** Any node can act
 ## 3. Resource tiers (verified)
 
 1. **Cloud** — rpi4's Ollama `:cloud` subscription models: `deepseek-v4*`, `kimi-k2.x`, `glm-5.x`, `gemma4:31b-cloud` (default), `nemotron-3*`, `gemini-3-flash`, `gpt-oss:120b`, `mistral-large-3:675b`, `qwen3.5`, `minimax-m3`. Fast. Cap: 3 models parallel. Burns token budget fast.
-2. **Local (Mac only)** — mac-gateway Ollama: `granite4:3b` (main), `gemma3:4b`, `command-r7b:7b`, `hermes3:8b` (+ embeddings). Slow (~10 tok/s warm; 30min+ cold/long-context). Free.
+2. **Local (Mac only)** — Ollama: `granite4:3b` (main), `gemma3:4b`, `command-r7b:7b`, `hermes3:8b` (+ embeddings). Slow (~10 tok/s warm; 30min+ cold/long-context). Free.
 
 **Memory Constraint**: Parallelism is bounded by the 16GB RAM of the Mac. The Gateway must implement memory-aware concurrency gating to **avoid swap thrashing**, preventing SSD wear. Local is "parallel" compared to cloud, but not "unlimited."
 
@@ -128,13 +128,13 @@ Privacy is a hard gate, evaluated before latency/cost.
 | **3** | Mac Lattice Gateway (Ollama adapter, concurrency, telemetry) | Gateway serves local inference over `inference.v1` |
 | **4** | End-to-end integration | A routed request completes from Control → Gateway → client |
 | **5** | Failure & fallback (health checks, circuit breakers, fail-closed LOCAL_ONLY) | Kill a provider; routing degrades per policy, never violates privacy |
-| **6** | RPi3 integration (client only, behind bastion) | rpi3 requests inference without touching the control plane |
+| **6** | RPi3 integration (client only) | *(out of scope — this project is strictly rpi4 ↔ Mac)* |
 | **7** | Observability & hardening | Metrics/telemetry on; latency/cost/concurrency visible |
-| **8** | Provider abstraction (deferred) | Revisit FOSS vs build; only if a real second provider appears |
-| **9** | Advanced scheduling (deferred) | Only if observed workloads justify it |
+| **8** | Provider abstraction | *(implemented — `Provider` interface + registry in the Gateway)* |
+| **9** | Advanced scheduling | *(implemented — priority queues: interactive vs batch)* |
 | **10** | Lattice 2.x | Post-consolidation review |
 
-Phases 0–7 are the core. Phases 8–10 are explicitly deferred and gated on observed need.
+Phases 0–9 are implemented. Phase 6 (rpi3) is out of scope. Phase 10 (Lattice 2.x) is a future consolidation review.
 
 ---
 

@@ -186,7 +186,7 @@ rather than building a huge platform.
 **5. Rust litellm-rs**  
 Given your preference for low-overhead infrastructure, I would also keep an eye on litellm-rs.  
 It is implementing a self-hosted gateway in Rust with OpenAI-compatible APIs, provider routing, load balancing, failover, cost optimisation, authentication, metrics and health endpoints. ++[GitHub](https://github.com/majiayu000/litellm-rs?utm_source=chatgpt.com)++  
-For something eventually living on your RPi4/NAS-class infrastructure, **Rust is architecturally interesting**.  
+For something eventually living on your RPi4-class infrastructure, **Rust is architecturally interesting**.  
   
 ## The really important part for your three-node system  
 I would **not** do this:  
@@ -403,7 +403,7 @@ Instead, build a small **Inference Control Plane specification** around your thr
 If LiteLLM can do everything you need, simplify to one gateway. If OmniRoute proves substantially better at the cloud-provider side, retain it as a subordinate cloud router.  
 The critical design decision is that **Hermes/S.E.E.D. should never need to know which provider or physical node actually performed inference**.  
 That abstraction will save you an enormous amount of complexity as the three-node system evolves.  
- ## The network hosts have changed… the nas is out, we now have only the rpi4 and the rpi3. The rpi3 is a DNS sinkhole, honeypot, cybersec bastion securing the network, the rpi4 maintains it’s role and only the Macbook Air M1 16Gb is able to do local inference, for local inference, both Pis route to the Macbook, for cloud inference and simplicity they can also route to the Macbook Air although if the Macbook isn’t available, they can do the cloud inference through their own ollama application as  fallback - the Pis only run cloud models as their hardware is very weak, only the Macbook runs local models. Right now, the only provider is ollama but in the future we may add additional providers ##  Yes — that change actually makes the architecture **much cleaner**. The important distinction is now that you have **one actual local-inference host** and two lightweight infrastructure/agent nodes.  
+ ## The network hosts have changed… a fourth host is retired, we now have only the rpi4 and the rpi3. The rpi3 is a DNS sinkhole, honeypot, cybersec bastion securing the network, the rpi4 maintains it’s role and only the Macbook Air M1 16Gb is able to do local inference, for local inference, both Pis route to the Macbook, for cloud inference and simplicity they can also route to the Macbook Air although if the Macbook isn’t available, they can do the cloud inference through their own ollama application as  fallback - the Pis only run cloud models as their hardware is very weak, only the Macbook runs local models. Right now, the only provider is ollama but in the future we may add additional providers ##  Yes — that change actually makes the architecture **much cleaner**. The important distinction is now that you have **one actual local-inference host** and two lightweight infrastructure/agent nodes.  
 I would model the current topology as:  
 ```
                          ┌──────────────────────┐

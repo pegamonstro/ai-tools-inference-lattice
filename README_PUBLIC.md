@@ -27,6 +27,10 @@ Lattice extends the OpenAI API by adding a `routing` object to requests:
   "privacy": "LOCAL_ONLY | LOCAL_PREFERRED | CLOUD_ALLOWED",
   "latency_class": "interactive | batch",
   "parallelism": 1,
-  "request_id": "uuid"
+  "request_id": "uuid",
+  "provider_params": {
+    "reasoning_effort": "low | medium | high",
+    "max_budget": 4096
+  }
 }
 ```

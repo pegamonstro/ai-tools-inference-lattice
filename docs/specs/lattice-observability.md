@@ -1,7 +1,7 @@
 # Spec: Lattice Observability & Hardening (Phase 7)
 
 **Status:** Draft
-**Host:** RPi4 (`user@rpi4`)
+**Host:** RPi4
 
 Lattice must be observable to verify that the routing policy is working as intended and to identify bottlenecks in the Mac Gateway.
 
@@ -26,7 +26,7 @@ Every routed request must generate a telemetry event:
 
 To keep the system "deterministic" and avoid "speculative infrastructure" (Rule 5), we avoid Prometheus/Grafana for now.
 
-- **Local Logging**: All telemetry events written as JSON lines to `/var/log/lattice/telemetry.jsonl`.
+- **Local Logging**: Control-plane telemetry is written as JSON lines to `/var/log/lattice/telemetry-control.jsonl`; frontend telemetry goes to `telemetry-frontend.jsonl` (relative to the frontend's working directory).
 - **Summary Tool**: A small Go utility `lattice-stats` that reads the log and prints a summary:
   - Average latency per target.
   - Total token spend (Cloud).
