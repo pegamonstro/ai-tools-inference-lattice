@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,7 +33,7 @@ type Decision struct {
 }
 
 type Telemetry struct {
-	RequestID    string  `json:"request_id"`
+	RequestID     string  `json:"request_id"`
 	DecisionTime float64 `json:"decision_time_s"`
 	Target       string  `json:"target"`
 	Model        string  `json:"model"`
@@ -39,9 +41,14 @@ type Telemetry struct {
 	LatencyClass string  `json:"latency_class"`
 }
 
+type Task struct {
+	Req        Request
+	Decision   Decision
+	ResponseCh chan Decision
+}
+
 var (
-	cloudSemaphore = make(chan struct{}, 3)
-	capabilities   = map[string]struct {
+	capabilities = map[string]struct {
 		local string
 		cloud string
 	}{
@@ -53,10 +60,18 @@ var (
 
 	gatewayHealthy = true
 	healthMutex    sync.RWMutex
+
+	highPriorityQueue = make(chan *Task, 100)
+	lowPriorityQueue   = make(chan *Task, 100)
+	cloudActive       int32
+
+	// Map to track active cloud requests for release
+	activeRequests = make(map[string]chan struct{})
+	activeMutex    sync.Mutex
 )
 
 func logTelemetry(t Telemetry) {
-	f, err := os.OpenFile("telemetry-control.jsonl", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile("/var/log/lattice/telemetry-control.jsonl", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Printf("Telemetry error: %v\n", err)
 		return
@@ -81,6 +96,85 @@ func monitorHealth() {
 		}
 		time.Sleep(10 * time.Second)
 	}
+}
+
+func dispatcher() {
+	semaphore := make(chan struct{}, 3)
+
+	for {
+		var task *Task
+		select {
+		case t := <-highPriorityQueue:
+			task = t
+		default:
+			select {
+			case t := <-lowPriorityQueue:
+				task = t
+			default:
+				select {
+				case t := <-highPriorityQueue:
+					task = t
+				case t := <-lowPriorityQueue:
+					task = t
+				}
+			}
+		}
+
+		go func(t *Task) {
+			semaphore <- struct{}{}
+			atomic.AddInt32(&cloudActive, 1)
+
+			// Create a release channel for this request
+			relCh := make(chan struct{})
+			activeMutex.Lock()
+			activeRequests[t.Req.Routing.RequestID] = relCh
+			activeMutex.Unlock()
+
+			t.ResponseCh <- t.Decision
+
+			// Hold slot until release is called
+			<-relCh
+
+			activeMutex.Lock()
+			delete(activeRequests, t.Req.Routing.RequestID)
+			activeMutex.Unlock()
+
+			atomic.AddInt32(&cloudActive, -1)
+			<-semaphore
+		}(task)
+	}
+}
+
+func handleRelease(w http.ResponseWriter, r *http.Request) {
+	rid := r.URL.Query().Get("request_id")
+	if rid == "" {
+		http.Error(w, "missing request_id", http.StatusBadRequest)
+		return
+	}
+
+	activeMutex.Lock()
+	relCh, ok := activeRequests[rid]
+	activeMutex.Unlock()
+
+	if !ok {
+		http.Error(w, "request_id not found", http.StatusNotFound)
+		return
+	}
+
+	relCh <- struct{}{}
+	w.WriteHeader(http.StatusOK)
+}
+
+func handleStatus(w http.ResponseWriter, r *http.Request) {
+	healthMutex.RLock()
+	healthy := gatewayHealthy
+	healthMutex.RUnlock()
+
+	status := map[string]interface{}{
+		"gateway_healthy": healthy,
+		"cloud_active":    atomic.LoadInt32(&cloudActive),
+	}
+	json.NewEncoder(w).Encode(status)
 }
 
 func handleRoute(w http.ResponseWriter, r *http.Request) {
@@ -113,25 +207,6 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 		target = "cloud"
 	}
 
-	if target == "cloud" {
-		select {
-		case cloudSemaphore <- struct{}{}:
-			defer func() { <-cloudSemaphore }()
-		default:
-			if req.Routing.Privacy != "LOCAL_ONLY" {
-				fmt.Println("  Cloud full, spilling to local")
-				target = "local"
-				if !healthy {
-					http.Error(w, "Cloud full and Gateway unhealthy", http.StatusServiceUnavailable)
-					return
-				}
-			} else {
-				http.Error(w, "Cloud capacity exceeded and LOCAL_ONLY requested", http.StatusServiceUnavailable)
-				return
-			}
-		}
-	}
-
 	cap, ok := capabilities[req.Model]
 	if !ok {
 		http.Error(w, "Unknown model alias", http.StatusBadRequest)
@@ -151,6 +226,23 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 		ModelName: modelName,
 	}
 
+	if target == "cloud" {
+		respCh := make(chan Decision, 1)
+		task := &Task{
+			Req:        req,
+			Decision:   decision,
+			ResponseCh: respCh,
+		}
+
+		if req.Routing.LatencyClass == "interactive" {
+			highPriorityQueue <- task
+		} else {
+			lowPriorityQueue <- task
+		}
+
+		decision = <-respCh
+	}
+
 	logTelemetry(Telemetry{
 		RequestID:    req.Routing.RequestID,
 		DecisionTime: time.Since(t0).Seconds(),
@@ -165,7 +257,10 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	go monitorHealth()
+	go dispatcher()
+	http.HandleFunc("/status", handleStatus)
 	http.HandleFunc("/route", handleRoute)
+	http.HandleFunc("/release", handleRelease)
 	fmt.Println("Lattice Control listening on :8082...")
 	log.Fatal(http.ListenAndServe(":8082", nil))
 }

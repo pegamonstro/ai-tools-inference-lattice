@@ -44,7 +44,9 @@ Invariant: **the RPi4 decides; the Mac executes.** Neither is allowed to drift i
 ## 3. Resource tiers (verified)
 
 1. **Cloud** — rpi4's Ollama `:cloud` subscription models: `deepseek-v4*`, `kimi-k2.x`, `glm-5.x`, `gemma4:31b-cloud` (default), `nemotron-3*`, `gemini-3-flash`, `gpt-oss:120b`, `mistral-large-3:675b`, `qwen3.5`, `minimax-m3`. Fast. Cap: 3 models parallel. Burns token budget fast.
-2. **Local (Mac only)** — mac-gateway Ollama: `granite4:3b` (main), `gemma3:4b`, `command-r7b:7b`, `hermes3:8b` (+ embeddings). Slow (~10 tok/s warm; 30min+ cold/long-context). Free + unlimited parallel.
+2. **Local (Mac only)** — mac-gateway Ollama: `granite4:3b` (main), `gemma3:4b`, `command-r7b:7b`, `hermes3:8b` (+ embeddings). Slow (~10 tok/s warm; 30min+ cold/long-context). Free.
+
+**Memory Constraint**: Parallelism is bounded by the 16GB RAM of the Mac. The Gateway must implement memory-aware concurrency gating to **avoid swap thrashing**, preventing SSD wear. Local is "parallel" compared to cloud, but not "unlimited."
 
 > **No third tier** (user decision 2026-09-25): rpi4's tiny models (`smollm2`, `qwen2.5:1.5b`, `nomic-embed-text`, `embeddinggemma`) are NOT a routing resource. rpi4 is cloud-only; all local inference — including embeddings — consolidates to the Mac.
 
@@ -71,7 +73,9 @@ Routing is a function of four inputs:
 | `CLOUD_ALLOWED` | interactive | cloud (fast), subject to 3-parallel cap |
 | `CLOUD_ALLOWED` | batch | local preferred (free); cloud if local unavailable or explicit override |
 
-**Fallback:** the only fallback for local is **cloud (rpi4)**. Mac unavailable → `LOCAL_PREFERRED` / `CLOUD_ALLOWED` fall back to cloud; `LOCAL_ONLY` fails closed (never cloud). There is no third tier.
+**Fallback:** the only fallback for local is **cloud (rpi4)**. Mac unavailable → `LOCAL_PREFERRED` / `CLOUD_ALLOWED` fall back to cloud; `LOCAL_ONLY` fails closed (never cloud).
+
+**Swap Avoidance**: All local routing is subject to a memory-pressure gate. Requests that would force the Mac into swap must be queued or degraded to cloud (if privacy allows) to preserve SSD health.
 
 ### Cloud concurrency gate
 
@@ -109,7 +113,7 @@ Privacy is a hard gate, evaluated before latency/cost.
 3. RPi3 remains a security appliance.
 4. One canonical protocol (`inference.v1`).
 5. No speculative infrastructure (Kubernetes, Redis, Kafka, RabbitMQ, Postgres for routing).
-6. No premature provider abstraction.
+6. **No Swap Thrashing** — the Mac (16GB) is the only local host; the Gateway must prevent memory over-subscription to protect SSD health.
 7. Deterministic infrastructure.
 8. Every phase has an exit test.
 9. Preserve reversibility.
