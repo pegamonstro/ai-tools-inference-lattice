@@ -22,9 +22,9 @@ Hermes default cloud model: `gemma4:31b-cloud` (provider `ollama-launch`, api `h
 
 `granite4:3b` (main local, 2.1 GB), `gemma3:4b` (3.3 GB), `command-r7b:7b` (5.1 GB), `hermes3:8b` (4.7 GB).
 
-### Tiny/embedding tier — rpi4 Ollama local (free, for embeddings/lightweight only)
+### rpi4 tiny local models — NOT a routing tier (user decision 2026-09-25)
 
-`smollm2:135m`, `smollm2:360m`, `qwen2.5:1.5b`, `nomic-embed-text`, `embeddinggemma`, `solace-tinyllama`.
+`smollm2:135m`, `smollm2:360m`, `qwen2.5:1.5b`, `nomic-embed-text`, `embeddinggemma`, `solace-tinyllama`. These exist on rpi4's Ollama but are **out of scope**: rpi4 is cloud-only; all local inference (including embeddings) consolidates to the Mac.
 
 ### rpi3
 

@@ -6,7 +6,7 @@ A lightweight distributed inference **control and execution** system for a three
 
 | Host | Role | Inference |
 |---|---|---|
-| **RPi4** (`user@rpi4`, Debian 13, aarch64) | Control plane — policy, capability, health, fallback, concurrency gate | Cloud client + tiny embedding models |
+| **RPi4** (`user@rpi4`, Debian 13, aarch64) | Control plane — policy, capability, health, fallback, concurrency gate | Cloud-only client |
 | **Mac mac-gateway** (Apple M1, 16 GB) | Lattice Gateway — the ONLY substantive local-LLM host | `granite4:3b` (main), `gemma3:4b`, `command-r7b:7b`, `hermes3:8b` |
 | **RPi3** (Alpine 3.24, OpenRC) | Security appliance + homelab services | Inference client only; never computes local models |
 

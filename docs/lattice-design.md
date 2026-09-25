@@ -30,9 +30,9 @@ The router's job is to put latency-critical work on the scarce-fast resource and
 ```
 RPi4  (user@rpi4)   ── Control plane. Policy, capability registry, lifecycle,
                       health, fallback, observability, cloud-concurrency gate.
-                      No substantive local LLM. Cloud client + tiny embedding models.
+                      Cloud-only client — no local inference of any kind (hardware too limited).
 Mac mac-gateway (this) ── Lattice Gateway. Ollama, provider adapters, concurrency.
-                      The ONLY substantive local-LLM host.
+                      The ONLY local-inference host — all locals (LLM + embeddings) live here.
 RPi3              ── Security appliance (DNS sinkhole, honeypot, bastion).
                       Outside the control plane. Inference client only.
 ```
@@ -44,8 +44,9 @@ Invariant: **the RPi4 decides; the Mac executes.** Neither is allowed to drift i
 ## 3. Resource tiers (verified)
 
 1. **Cloud** — rpi4's Ollama `:cloud` subscription models: `deepseek-v4*`, `kimi-k2.x`, `glm-5.x`, `gemma4:31b-cloud` (default), `nemotron-3*`, `gemini-3-flash`, `gpt-oss:120b`, `mistral-large-3:675b`, `qwen3.5`, `minimax-m3`. Fast. Cap: 3 models parallel. Burns token budget fast.
-2. **Mac-local LLM** — mac-gateway Ollama: `granite4:3b` (main), `gemma3:4b`, `command-r7b:7b`, `hermes3:8b`. Slow. Free + unlimited parallel.
-3. **rpi4-local tiny/embedding** — `smollm2:135m/360m`, `qwen2.5:1.5b`, `nomic-embed-text`, `embeddinggemma`. Embeddings/lightweight only; not "local LLM inference."
+2. **Local (Mac only)** — mac-gateway Ollama: `granite4:3b` (main), `gemma3:4b`, `command-r7b:7b`, `hermes3:8b` (+ embeddings). Slow (~10 tok/s warm; 30min+ cold/long-context). Free + unlimited parallel.
+
+> **No third tier** (user decision 2026-09-25): rpi4's tiny models (`smollm2`, `qwen2.5:1.5b`, `nomic-embed-text`, `embeddinggemma`) are NOT a routing resource. rpi4 is cloud-only; all local inference — including embeddings — consolidates to the Mac.
 
 ---
 
@@ -70,6 +71,8 @@ Routing is a function of four inputs:
 | `CLOUD_ALLOWED` | interactive | cloud (fast), subject to 3-parallel cap |
 | `CLOUD_ALLOWED` | batch | local preferred (free); cloud if local unavailable or explicit override |
 
+**Fallback:** the only fallback for local is **cloud (rpi4)**. Mac unavailable → `LOCAL_PREFERRED` / `CLOUD_ALLOWED` fall back to cloud; `LOCAL_ONLY` fails closed (never cloud). There is no third tier.
+
 ### Cloud concurrency gate
 
 Cloud is the scarce resource. The Control plane enforces the **3-parallel cap**: excess concurrent interactive cloud requests are queued; non-interactive excess is degraded to local (if privacy allows).
@@ -83,9 +86,9 @@ For a workload with both a latency-critical part and a parallelizable part, spli
 
 Local's unlimited parallelism is the compensation for its per-item slowness: 10 slow local workers in parallel ≈ 1 fast cloud call's wall-clock, at zero token cost.
 
-### Open measurement (must resolve in Phase 0)
+### Measurement (resolved in Phase 0)
 
-The earlier doctrine recorded `granite4:3b` at ~13.1 tok/s (→ ~40s/responses), but observed reality is 30min+/turn. The entire policy hinges on the true local-latency distribution. **Phase 0 must measure actual local latency** (short vs long context, cold vs warm model) before the routing thresholds are trusted.
+Measured (see `docs/baseline.md`): `granite4:3b` ≈ 10 tok/s warm — a 100-token turn ≈ 13s, short-reply-viable. The reported 30min+/turn is the cold-load / long-context / model-thrash case (`OLLAMA_MAX_LOADED_MODELS=1`). Conclusion: cloud is the interactive default; local serves batch, embeddings, and short drafts.
 
 ---
 
@@ -145,8 +148,8 @@ Phases 0–7 are the core. Phases 8–10 are explicitly deferred and gated on ob
 
 ## 9. Open questions
 
-1. **Local latency truth** — resolve via Phase 0 measurement (section 4).
+1. ~~Local latency truth~~ — resolved in Phase 0: ~10 tok/s warm; cloud = interactive default.
 2. **State store** — SQLite vs append-only log (Phase 2).
 3. **Concurrency-gate policy** — queue vs degrade threshold, and whether interactive cloud requests preempt queued batch (Phase 2).
 4. **Authn/z between hosts** — mTLS vs tailnet-only trust (Phase 2/4).
-5. **Whether "local" small models on rpi4 (qwen2.5:1.5b) should ever serve interactive requests** — likely no; embeddings only (Phase 2).
+5. ~~rpi4 small models~~ — resolved 2026-09-25: no local inference on rpi4 at all; embeddings consolidate to the Mac (Phase 3).
