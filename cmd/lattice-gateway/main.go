@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 )
-
-// --- Protocol Types ---
 
 type Routing struct {
 	Privacy      string `json:"privacy"`
@@ -53,6 +55,48 @@ type Usage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
+// --- Dynamic Memory Budgeter ---
+
+type MemoryBudgeter struct {
+	maxRAMBytes uint64
+	safeMargin  uint64 // bytes to keep free to avoid swap
+}
+
+func NewMemoryBudgeter() *MemoryBudgeter {
+	// Get total RAM via sysctl
+	out, _ := exec.Command("sysctl", "-n", "hw.memsize").Output()
+	mem, _ := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64)
+
+	return &MemoryBudgeter{
+		maxRAMBytes: mem,
+		safeMargin:  4 * 1024 * 1024 * 1024, // Keep 4GB free
+	}
+}
+
+func (mb *MemoryBudgeter) CanAccommodate() bool {
+	// Get current free memory via vm_stat
+	out, err := exec.Command("vm_stat").Output()
+	if err != nil {
+		return false
+	}
+
+	// vm_stat outputs pages. Page size is usually 4096 bytes on Mac.
+	// We look for "Pages free" and "Pages inactive"
+	lines := strings.Split(string(out), "\n")
+	var freePages, inactivePages uint64
+
+	for _, line := range lines {
+		if strings.Contains(line, "Pages free") {
+			fmt.Sscanf(line, "Pages free: %d", &freePages)
+		} else if strings.Contains(line, "Pages inactive") {
+			fmt.Sscanf(line, "Pages inactive: %d", &inactivePages)
+		}
+	}
+
+	availableBytes := (freePages + inactivePages) * 4096
+	return availableBytes > mb.safeMargin
+}
+
 // --- Provider Abstraction ---
 
 type Provider interface {
@@ -71,7 +115,6 @@ func (p *OllamaProvider) Name() string {
 func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 	targetURL, _ := url.Parse(p.Endpoint + "/v1/chat/completions")
 
-	// Prepare Ollama request
 	ollamaReq := map[string]interface{}{
 		"model":    req.Model,
 		"messages": req.Messages,
@@ -103,9 +146,9 @@ func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 // --- Gateway Logic ---
 
 var (
-	localSemaphore = make(chan struct{}, 2)
 	providers      = make(map[string]Provider)
 	providerMutex  sync.RWMutex
+	budgeter       *MemoryBudgeter
 )
 
 func handleInference(w http.ResponseWriter, r *http.Request) {
@@ -123,17 +166,15 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("Gateway executing request [%s] for model %s\n", req.Routing.RequestID, req.Model)
 
-	select {
-	case localSemaphore <- struct{}{}:
-		defer func() { <-localSemaphore }()
-	default:
-		fmt.Println("  Memory pressure: localSema full. Rejecting to avoid swap.")
-		http.Error(w, "Local memory pressure: request rejected to avoid swap", http.StatusTooManyRequests)
+	// Dynamic Memory Check
+	if !budgeter.CanAccommodate() {
+		fmt.Println("  Memory pressure: available RAM below safety margin. Rejecting to avoid swap.")
+		http.Error(w, "Local memory pressure: available RAM below safety margin", http.StatusTooManyRequests)
 		return
 	}
 
 	providerMutex.RLock()
-	provider, ok := providers["ollama"] // Default to ollama for now
+	provider, ok := providers["ollama"]
 	providerMutex.RUnlock()
 
 	if !ok {
@@ -150,13 +191,31 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(res)
 }
 
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	// Health check: is Ollama responsive AND is memory okay?
+	if !budgeter.CanAccommodate() {
+		http.Error(w, "Memory pressure high", http.StatusServiceUnavailable)
+		return
+	}
+
+	resp, err := http.Get("http://localhost:11434/api/tags")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		http.Error(w, "Ollama unhealthy", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
 func main() {
-	// Register providers
+	budgeter = NewMemoryBudgeter()
+
 	providerMutex.Lock()
 	providers["ollama"] = &OllamaProvider{Endpoint: "http://localhost:11434"}
 	providerMutex.Unlock()
 
 	http.HandleFunc("/v1/chat/completions", handleInference)
-	fmt.Println("Lattice Gateway listening on :8081 (with Provider Abstraction)...")
+	http.HandleFunc("/health", handleHealth)
+	fmt.Printf("Lattice Gateway listening on :8081 (Dynamic Memory Budgeting active)\n")
 	log.Fatal(http.ListenAndServe(":8081", nil))
 }
