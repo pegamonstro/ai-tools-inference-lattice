@@ -35,6 +35,17 @@ func proxyToOllama(targetURL string, w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	// Simple health check: is Ollama responsive?
+	resp, err := http.Get(ollamaURL + "/api/tags")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		http.Error(w, "Ollama unhealthy", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
 func handleInference(w http.ResponseWriter, r *http.Request) {
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -75,6 +86,7 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	http.HandleFunc("/health", handleHealth)
 	http.HandleFunc("/v1/chat/completions", handleInference)
 	fmt.Println("Lattice Gateway listening on :8081...")
 	log.Fatal(http.ListenAndServe(":8081", nil))

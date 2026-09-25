@@ -11,32 +11,13 @@ import (
 	"net/url"
 )
 
-type Routing struct {
-	Privacy      string `json:"privacy"`
-	LatencyClass string `json:"latency_class"`
-	Parallelism  int    `json:"parallelism"`
-	RequestID    string `json:"request_id"`
-}
-
-type Request struct {
-	Model    string        `json:"model"`
-	Messages []interface{} `json:"messages"`
-	Routing  Routing       `json:"routing"`
-}
-
-type Decision struct {
-	Target    string `json:"target"`
-	Endpoint  string `json:"endpoint"`
-	ModelName string `json:"model_name"`
-}
-
 var (
-	controlURL = "http://localhost:8082/route"
+	controlURL = "http://127.0.0.1:8082/route"
 )
 
 func handleChat(w http.ResponseWriter, r *http.Request) {
 	bodyBytes, _ := io.ReadAll(r.Body)
-	var req Request
+	var req map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -51,23 +32,27 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	var decision Decision
+	var decision struct {
+		Target    string `json:"target"`
+		Endpoint  string `json:"endpoint"`
+		ModelName string `json:"model_name"`
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&decision); err != nil {
 		http.Error(w, "Invalid decision from control plane", http.StatusInternalServerError)
 		return
 	}
 
-	fmt.Printf("Routed [%s] to %s (%s)\n", req.Routing.RequestID, decision.Target, decision.Endpoint)
+	fmt.Printf("Routed request to %s (%s)\n", decision.Target, decision.Endpoint)
 
 	// 2. Rewrite request for Target
-	req.Model = decision.ModelName
+	req["model"] = decision.ModelName
+	delete(req, "routing")
 	newBody, _ := json.Marshal(req)
 
 	// 3. Proxy to Target
 	targetURL, _ := url.Parse(decision.Endpoint)
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
-	// Override the request to hit /v1/chat/completions on the target
 	r.URL.Path = "/v1/chat/completions"
 	r.Body = io.NopCloser(bytes.NewBuffer(newBody))
 	r.ContentLength = int64(len(newBody))
