@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 )
@@ -12,9 +11,9 @@ import (
 type PrivacyLevel string
 
 const (
-	LocalOnly       PrivacyLevel = "LOCAL_ONLY"
-	LocalPreferred  PrivacyLevel = "LOCAL_PREFERRED"
-	CloudAllowed    PrivacyLevel = "CLOUD_ALLOWED"
+	LocalOnly      PrivacyLevel = "LOCAL_ONLY"
+	LocalPreferred PrivacyLevel = "LOCAL_PREFERRED"
+	CloudAllowed   PrivacyLevel = "CLOUD_ALLOWED"
 )
 
 type LatencyClass string
@@ -38,8 +37,8 @@ type Request struct {
 }
 
 type Response struct {
-	ID       string `json:"id"`
-	Choices  []struct {
+	ID      string `json:"id"`
+	Choices []struct {
 		Message struct {
 			Content string `json:"content"`
 		} `json:"message"`

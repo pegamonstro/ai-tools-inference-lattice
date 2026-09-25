@@ -7,17 +7,17 @@ import (
 )
 
 type Routing struct {
-	Privacy       string `json:"privacy"`
-	LatencyClass  string `json:"latency_class"`
-	Parallelism   int    `json:"parallelism"`
-	RequestID     string `json:"request_id"`
+	Privacy      string `json:"privacy"`
+	LatencyClass string `json:"latency_class"`
+	Parallelism  int    `json:"parallelism"`
+	RequestID    string `json:"request_id"`
 }
 
 type Request struct {
-	Model    string  `json:"model"`
+	Model    string        `json:"model"`
 	Messages []interface{} `json:"messages"`
-	Routing  Routing `json:"routing"`
-	Stream   bool    `json:"stream"`
+	Routing  Routing       `json:"routing"`
+	Stream   bool          `json:"stream"`
 }
 
 func handleChat(w http.ResponseWriter, r *http.Request) {
@@ -34,7 +34,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("  Parallelism: %d\n", req.Routing.Parallelism)
 
 	resp := map[string]interface{}{
-		"id": "ref-completion-123",
+		"id":     "ref-completion-123",
 		"object": "chat.completion",
 		"choices": []interface{}{
 			map[string]interface{}{

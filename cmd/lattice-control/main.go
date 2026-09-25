@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"sync"
@@ -14,10 +14,10 @@ import (
 )
 
 type Routing struct {
-	Privacy         string                 `json:"privacy"`
-	LatencyClass    string                 `json:"latency_class"`
-	Parallelism     int                    `json:"parallelism"`
-	RequestID       string                 `json:"request_id"`
+	Privacy        string                 `json:"privacy"`
+	LatencyClass   string                 `json:"latency_class"`
+	Parallelism    int                    `json:"parallelism"`
+	RequestID      string                 `json:"request_id"`
 	ProviderParams map[string]interface{} `json:"provider_params"`
 }
 
@@ -34,7 +34,7 @@ type Decision struct {
 }
 
 type Telemetry struct {
-	RequestID     string  `json:"request_id"`
+	RequestID    string  `json:"request_id"`
 	DecisionTime float64 `json:"decision_time_s"`
 	Target       string  `json:"target"`
 	Model        string  `json:"model"`
@@ -107,7 +107,7 @@ var (
 	healthMutex    sync.RWMutex
 
 	highPriorityQueue = make(chan *Task, 100)
-	lowPriorityQueue   = make(chan *Task, 100)
+	lowPriorityQueue  = make(chan *Task, 100)
 	cloudActive       int32
 )
 
@@ -179,7 +179,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	healthMutex.RUnlock()
 
 	res := map[string]interface{}{
-		"gateways":    status,
+		"gateways":     status,
 		"cloud_active": atomic.LoadInt32(&cloudActive),
 	}
 	json.NewEncoder(w).Encode(res)
@@ -215,20 +215,22 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 	var targetID, endpoint, modelName string
 
 	if requiredCap == "cloud" {
-		// Find the most efficient/budget-friendly provider
-		var bestProvider *Provider
-		minCost := 999999.9
+		// Find the cheapest provider that supports the "cloud" capability.
+		var bestProvider Provider
+		found := false
+		minCost := math.MaxFloat64
 
-		for id, p := range providers {
+		for _, p := range providers {
 			for _, cap := range p.Capabilities {
 				if cap == "cloud" && p.CostPerToken < minCost {
 					minCost = p.CostPerToken
-					bestProvider = &p
+					bestProvider = p
+					found = true
 				}
 			}
 		}
 
-		if bestProvider != nil {
+		if found {
 			targetID = bestProvider.ID
 			endpoint = bestProvider.Endpoint
 			modelName = capabilities[req.Model].cloud
@@ -270,7 +272,7 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 		ModelName: modelName,
 	}
 
-	if targetID == "rpi4-internal" && targetID != "mac-gateway" { // if it's cloud
+	if requiredCap == "cloud" {
 		respCh := make(chan Decision, 1)
 		task := &Task{
 			Req:        req,

@@ -7,9 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -30,18 +28,18 @@ type Request struct {
 }
 
 type Response struct {
-	ID       string `json:"id"`
-	Object   string `json:"object"`
-	Created  int64  `json:"created"`
-	Model    string `json:"model"`
-	Choices  []Choice `json:"choices"`
-	Usage    Usage    `json:"usage"`
+	ID      string   `json:"id"`
+	Object  string   `json:"object"`
+	Created int64    `json:"created"`
+	Model   string   `json:"model"`
+	Choices []Choice `json:"choices"`
+	Usage   Usage    `json:"usage"`
 }
 
 type Choice struct {
-	Index    int    `json:"index"`
-	Message  Message `json:"message"`
-	FinishReason string `json:"finish_reason"`
+	Index        int     `json:"index"`
+	Message      Message `json:"message"`
+	FinishReason string  `json:"finish_reason"`
 }
 
 type Message struct {
@@ -146,9 +144,9 @@ func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 // --- Gateway Logic ---
 
 var (
-	providers      = make(map[string]Provider)
-	providerMutex  sync.RWMutex
-	budgeter       *MemoryBudgeter
+	providers     = make(map[string]Provider)
+	providerMutex sync.RWMutex
+	budgeter      *MemoryBudgeter
 )
 
 func handleInference(w http.ResponseWriter, r *http.Request) {

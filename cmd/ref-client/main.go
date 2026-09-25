@@ -9,10 +9,10 @@ import (
 )
 
 type Routing struct {
-	Privacy       string `json:"privacy"`
-	LatencyClass  string `json:"latency_class"`
-	Parallelism   int    `json:"parallelism"`
-	RequestID     string `json:"request_id"`
+	Privacy      string `json:"privacy"`
+	LatencyClass string `json:"latency_class"`
+	Parallelism  int    `json:"parallelism"`
+	RequestID    string `json:"request_id"`
 }
 
 type Request struct {
