@@ -134,28 +134,31 @@ func (p *OllamaProvider) Name() string {
 }
 
 func (p *OllamaProvider) Execute(req Request) (*Response, error) {
-	targetURL, _ := url.Parse(p.Endpoint + "/v1/chat/completions")
-
-	ollamaReq := map[string]interface{}{
-		"model":    req.Model,
-		"messages": req.Messages,
-		"stream":   false,
-	}
+	// Native /api/chat endpoint, not /v1/chat/completions: Ollama's OpenAI
+	// compat layer silently drops the "options" object, so num_ctx/kv_cache_type
+	// would never take effect there. The native endpoint honors options and
+	// returns the same message content, which we map back to OpenAI shape below.
+	targetURL, _ := url.Parse(p.Endpoint + "/api/chat")
 
 	// max_budget caps output length (default 4096).
 	maxTokens := 4096
 	if mb, ok := req.Routing.ProviderParams["max_budget"].(float64); ok {
 		maxTokens = int(mb)
-		ollamaReq["max_tokens"] = maxTokens
 	}
 
 	// Context window is sized dynamically to the prompt: short prompts keep a
 	// small KV cache (low memory), while large agent prompts grow it. reasoning_effort
 	// raises the ceiling, and a configurable cap prevents the 131072-token default
 	// from bloating memory.
-	ollamaReq["options"] = map[string]interface{}{
-		"num_ctx":       contextWindow(req.Messages, maxTokens, req.Routing.ProviderParams),
-		"kv_cache_type": kvCacheType,
+	ollamaReq := map[string]interface{}{
+		"model":    req.Model,
+		"messages": req.Messages,
+		"stream":   false,
+		"options": map[string]interface{}{
+			"num_ctx":       contextWindow(req.Messages, maxTokens, req.Routing.ProviderParams),
+			"num_predict":   maxTokens,
+			"kv_cache_type": kvCacheType,
+		},
 	}
 
 	body, _ := json.Marshal(ollamaReq)
@@ -174,11 +177,35 @@ func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 		return nil, fmt.Errorf("ollama returned status %d", resp.StatusCode)
 	}
 
-	var res Response
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+	var native struct {
+		Model   string `json:"model"`
+		Message struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"message"`
+		PromptEvalCount int `json:"prompt_eval_count"`
+		EvalCount       int `json:"eval_count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&native); err != nil {
 		return nil, err
 	}
-	return &res, nil
+
+	return &Response{
+		ID:      "chatcmpl-" + req.Routing.RequestID,
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   native.Model,
+		Choices: []Choice{{
+			Index:        0,
+			Message:      Message{Role: native.Message.Role, Content: native.Message.Content},
+			FinishReason: "stop",
+		}},
+		Usage: Usage{
+			PromptTokens:     native.PromptEvalCount,
+			CompletionTokens: native.EvalCount,
+			TotalTokens:      native.PromptEvalCount + native.EvalCount,
+		},
+	}, nil
 }
 
 // maxContext is the hard ceiling on num_ctx, configurable via
@@ -212,7 +239,10 @@ func kvCacheTypeFromEnv() string {
 // ceiling (low=4096, default=8192, high=maxContext), so "high" lets an agent
 // reason over more tokens without forcing every request to pay for them.
 func contextWindow(messages []interface{}, maxTokens int, providerParams map[string]interface{}) int {
-	ceiling := 8192
+	// Default ceiling is the configured max (32768): large agent prompts must be
+	// allowed to grow, otherwise Ollama truncates them. reasoning_effort=low is
+	// the only knob that deliberately restricts it (for memory-sensitive calls).
+	ceiling := maxContext
 	if re, ok := providerParams["reasoning_effort"].(string); ok {
 		switch re {
 		case "low":
