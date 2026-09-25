@@ -77,9 +77,18 @@ func NewMemoryBudgeter() *MemoryBudgeter {
 		pageSize = 4096
 	}
 
+	// Safety margin (bytes) kept free to avoid swap. Configurable in MiB via
+	// LATTICE_GATEWAY_MEMORY_MARGIN_MB; defaults to 1536 (1.5 GiB).
+	marginMB := 1536
+	if v := latticeconfig.Env("LATTICE_GATEWAY_MEMORY_MARGIN_MB", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			marginMB = n
+		}
+	}
+
 	return &MemoryBudgeter{
 		maxRAMBytes: mem,
-		safeMargin:  4 * 1024 * 1024 * 1024, // Keep 4GB free
+		safeMargin:  uint64(marginMB) * 1024 * 1024,
 		pageSize:    pageSize,
 	}
 }
