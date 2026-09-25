@@ -25,8 +25,6 @@ type Request struct {
 }
 
 var (
-	// Memory-Aware Concurrency Gate:
-	// Conserve RAM to avoid swap thrashing.
 	localSemaphore = make(chan struct{}, 2)
 	ollamaURL      = "http://localhost:11434"
 )
@@ -44,13 +42,19 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req Request
+	var req map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	fmt.Printf("Gateway receiving request [%s] for model %s\n", req.Routing.RequestID, req.Model)
+	routing, ok := req["routing"].(map[string]interface{})
+	if !ok {
+		http.Error(w, "missing routing metadata", http.StatusBadRequest)
+		return
+	}
+
+	fmt.Printf("Gateway receiving request [%v] for model %v\n", routing["request_id"], req["model"])
 
 	select {
 	case localSemaphore <- struct{}{}:
@@ -61,8 +65,11 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reset body for the proxy
-	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	delete(req, "routing")
+	newBodyBytes, _ := json.Marshal(req)
+	fmt.Printf("Proxying Body: %s\n", string(newBodyBytes))
+	r.Body = io.NopCloser(bytes.NewBuffer(newBodyBytes))
+	r.ContentLength = int64(len(newBodyBytes))
 
 	proxyToOllama(ollamaURL, w, r)
 }
