@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
@@ -29,6 +30,15 @@ type Decision struct {
 	ModelName string `json:"model_name"`
 }
 
+type Telemetry struct {
+	RequestID    string  `json:"request_id"`
+	DecisionTime float64 `json:"decision_time_s"`
+	Target       string  `json:"target"`
+	Model        string  `json:"model"`
+	Privacy      string  `json:"privacy"`
+	LatencyClass string  `json:"latency_class"`
+}
+
 var (
 	cloudSemaphore = make(chan struct{}, 3)
 	capabilities   = map[string]struct {
@@ -41,10 +51,20 @@ var (
 	macGatewayURL = "http://localhost:8081"
 	cloudURL      = "http://localhost:11434"
 
-	// Health State
 	gatewayHealthy = true
 	healthMutex    sync.RWMutex
 )
+
+func logTelemetry(t Telemetry) {
+	f, err := os.OpenFile("telemetry-control.jsonl", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Printf("Telemetry error: %v\n", err)
+		return
+	}
+	defer f.Close()
+	b, _ := json.Marshal(t)
+	f.Write(append(b, '\n'))
+}
 
 func monitorHealth() {
 	for {
@@ -64,6 +84,7 @@ func monitorHealth() {
 }
 
 func handleRoute(w http.ResponseWriter, r *http.Request) {
+	t0 := time.Now()
 	bodyBytes, _ := io.ReadAll(r.Body)
 	var req Request
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
@@ -78,13 +99,11 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 	healthy := gatewayHealthy
 	healthMutex.RUnlock()
 
-	// 1. Routing Decision
 	target := "local"
 	if req.Routing.LatencyClass == "interactive" && req.Routing.Privacy != "LOCAL_ONLY" {
 		target = "cloud"
 	}
 
-	// 2. Fallback if Gateway unhealthy
 	if !healthy && target == "local" {
 		if req.Routing.Privacy == "LOCAL_ONLY" {
 			http.Error(w, "Gateway unhealthy and LOCAL_ONLY requested", http.StatusServiceUnavailable)
@@ -94,7 +113,6 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 		target = "cloud"
 	}
 
-	// 3. Cloud Concurrency Gate
 	if target == "cloud" {
 		select {
 		case cloudSemaphore <- struct{}{}:
@@ -103,7 +121,6 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 			if req.Routing.Privacy != "LOCAL_ONLY" {
 				fmt.Println("  Cloud full, spilling to local")
 				target = "local"
-				// If we spill back to local but local is unhealthy, we are stuck
 				if !healthy {
 					http.Error(w, "Cloud full and Gateway unhealthy", http.StatusServiceUnavailable)
 					return
@@ -133,6 +150,15 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 		Endpoint: endpoint,
 		ModelName: modelName,
 	}
+
+	logTelemetry(Telemetry{
+		RequestID:    req.Routing.RequestID,
+		DecisionTime: time.Since(t0).Seconds(),
+		Target:       target,
+		Model:        modelName,
+		Privacy:      req.Routing.Privacy,
+		LatencyClass: req.Routing.LatencyClass,
+	})
 
 	json.NewEncoder(w).Encode(decision)
 }
