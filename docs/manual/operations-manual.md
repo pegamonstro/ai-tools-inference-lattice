@@ -244,24 +244,49 @@ The Mac shares no filesystem with the Pi. The gateway therefore keeps the last
 256 events in memory and serves them over HTTP:
 
 ```
-GET http://<mac>:8081/telemetry?since=<seq>  →  { "seq": N, "events": [ ... ] }
+GET http://<mac>:8081/telemetry?since=<seq>
+  →  { "seq": N, "oldest_seq": O, "boot": "<id>", "events": [ ... ] }
 ```
 
 The control plane pulls this in its existing 10-second health loop and appends
-only new events to the relay file. The first pull seeds the cursor without
-replaying history. This replaced an earlier SSH-pipe relay and requires **no
-long-running process on the Mac** beyond the gateway itself.
+only new events to the relay file. This replaced an earlier SSH-pipe relay and
+requires **no long-running process on the Mac** beyond the gateway itself.
 
-> **Known gap: events are lost across restarts.** The gateway's `seq` counter
-> lives in memory and resets to zero when the gateway restarts, while the control
-> plane's cursor persists on the Pi. After a gateway restart the control plane
-> can therefore sit ahead of a counter that started over, silently relaying
-> nothing until the gateway's `seq` climbs past the old value. Separately, the
-> control plane's seed-on-first-pull skips anything already buffered at that
-> moment. Both are telemetry-only — inference is unaffected — but a dropped
-> event never appears on the Bee screen. Restarting the **control plane** as well
-> as the gateway clears the stranded cursor in the meantime; a proper fix is
-> tracked in the project's task list.
+Three fields exist because a cursor alone cannot tell *"nothing new"* from
+*"there is a hole"* — and a hole that looks like quiet is a dropped event nobody
+ever sees:
+
+- **`seq`** — the newest event. Unchanged in meaning.
+- **`oldest_seq`** — the oldest the ring still holds. A cursor below it means
+  events were evicted before the consumer read them.
+- **`boot`** — an id for this gateway process. `seq` is in memory, so it starts
+  over at 1 on every restart, and a new run's "seq 1" is indistinguishable from
+  the one already delivered. `boot` is what makes that visible.
+
+**Restart safety.** The relay file is the durable record of what has been
+delivered, so the control plane recovers its cursor *and* the boot id from its
+last line at startup and resumes there. Two consequences:
+
+- A control-plane restart resumes rather than seeding past the events that
+  arrived while it was down. A genuinely fresh install (no relay file) still
+  seeds without replaying, so a first start does not dump 256 stale events onto
+  the screen.
+- A gateway restart is detected by the changed boot id and resynced from
+  `oldest_seq`, so the events logged before the two halves re-sync are
+  *recovered*, not skipped.
+
+When events really are unrecoverable — the ring evicted them — the control plane
+writes a **gap marker** into the relay stream, and it reaches the Bee screen as
+an `ERROR` line rather than only a log nobody reads:
+
+```
+telemetry-gap relay ERROR gateway restarted, its event counter began again (3 lost)
+```
+
+A restart that cost nothing (the new run had logged nothing yet) produces no
+marker: restarts are routine now, and a red line on every one would just train
+the reader to ignore it. Gap markers carry the real `seq`, so a later restart
+still recovers its position from the file.
 
 ### Installing the feeder
 
@@ -313,7 +338,7 @@ vm_stat | grep -i swap          # Swapouts is the wear-relevant counter
 | Frontend returns empty reply to a streaming client | a rebuild dropped the `stream` field somewhere on the proxy path | verify the field survives frontend → gateway |
 | Cloud request returns empty model | client sent a real model name instead of a capability alias | use `local-brain` / `local-coder` |
 | Nothing on the Bee screen | feeder not running, or relay file not yet created | run the feeder in the foreground with `2>/tmp/feeder.log`; remember journald isn't persisted here |
-| Telemetry stops after a restart | gateway `seq` reset while the control plane's cursor stayed ahead | restart `lattice-control` too — see §6 |
+| A `telemetry-gap … ERROR` line on the Bee screen | the gateway's ring evicted events before the pull reached them, or a restart lost some | expected and self-healing — the line *is* the report. Frequent occurrences mean the gateway is restarting often; check `launchctl print gui/$UID/com.lattice.gateway` |
 | Unit won't start after an env edit | the `EnvironmentFile` is missing or unreadable (it is **not** optional) | check `~/.config/lattice/*.env` exists and is owned by the service account |
 
 **Killing processes.** Prefer the service manager. When you must kill directly,
@@ -333,6 +358,9 @@ its output buffers and the pipeline stalls.
       `launchctl print gui/$UID/com.lattice.gateway` on the Mac)
 - [ ] `/status` reports the gateway healthy
 - [ ] feeder unit active; all three telemetry files exist and are growing
+- [ ] no recent `telemetry-gap` lines in `telemetry-gateway.jsonl` — a gap marker
+      means the relay fell behind or the gateway bounced, and frequent ones mean
+      something is restarting more than it should
 - [ ] `bin/` on both hosts matches the current commit
 - [ ] a warm local request completes end-to-end (User Guide §5)
 - [ ] a `LOCAL_ONLY` request fails cleanly (503) when the gateway is stopped —

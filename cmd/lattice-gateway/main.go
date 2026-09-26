@@ -73,9 +73,17 @@ type Telemetry struct {
 }
 
 // TelemetryEvent tags a buffered event with a monotonic sequence so a remote
-// consumer can pull only what it has not seen yet.
+// consumer can pull only what it has not seen yet, and with the identity of the
+// process that issued that sequence.
+//
+// seq alone is ambiguous across a restart: this counter is in memory, so it
+// begins again at 1, and the new incarnation's "seq 1" is indistinguishable
+// from the one a consumer may already have received from the previous
+// incarnation. Boot is what makes the difference visible, and it rides on each
+// event so a consumer can persist it alongside the cursor.
 type TelemetryEvent struct {
-	Seq int64 `json:"seq"`
+	Seq  int64  `json:"seq"`
+	Boot string `json:"boot"`
 	Telemetry
 }
 
@@ -89,12 +97,17 @@ var (
 	telemetryRing  []TelemetryEvent
 	telemetrySeq   int64
 	telemetryMutex sync.Mutex
+
+	// telemetryBoot identifies this process's incarnation of the stream. It is
+	// assigned once at startup, so it changes on every restart — which is
+	// exactly when telemetrySeq starts over.
+	telemetryBoot = strconv.FormatInt(time.Now().UnixNano(), 36)
 )
 
 func logTelemetry(t Telemetry) {
 	telemetryMutex.Lock()
 	telemetrySeq++
-	telemetryRing = append(telemetryRing, TelemetryEvent{Seq: telemetrySeq, Telemetry: t})
+	telemetryRing = append(telemetryRing, TelemetryEvent{Seq: telemetrySeq, Boot: telemetryBoot, Telemetry: t})
 	if len(telemetryRing) > telemetryRingCap {
 		telemetryRing = telemetryRing[len(telemetryRing)-telemetryRingCap:]
 	}
@@ -113,11 +126,21 @@ func logTelemetry(t Telemetry) {
 
 // handleTelemetry serves buffered events with seq greater than ?since, so a
 // polling consumer advances a cursor rather than re-reading the whole buffer.
+//
+// It also reports oldest_seq, the earliest event the ring still holds. Without
+// it the consumer cannot distinguish "nothing new" from "there is a hole": a
+// cursor left behind by an eviction, or by a restart of this process resetting
+// the in-memory seq, would look identical to a quiet stream and the events in
+// between would vanish with no trace.
 func handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 
 	telemetryMutex.Lock()
 	seq := telemetrySeq
+	oldest := int64(0)
+	if len(telemetryRing) > 0 {
+		oldest = telemetryRing[0].Seq
+	}
 	events := make([]TelemetryEvent, 0, len(telemetryRing))
 	for _, e := range telemetryRing {
 		if e.Seq > since {
@@ -128,8 +151,10 @@ func handleTelemetry(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"seq":    seq,
-		"events": events,
+		"seq":        seq,
+		"oldest_seq": oldest,
+		"boot":       telemetryBoot,
+		"events":     events,
 	})
 }
 

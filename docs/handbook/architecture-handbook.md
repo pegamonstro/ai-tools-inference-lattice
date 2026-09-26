@@ -161,14 +161,51 @@ Design rules:
 
 **Crossing the host boundary.** The Mac and the Pi share no filesystem, so
 gateway telemetry is *pulled*: the gateway buffers its last 256 events and
-serves `GET /telemetry?since=<seq>`, and the control plane's existing 10-second
-health loop appends new events to a relay file on the Pi. Consequences worth
-knowing:
+serves
+
+```
+GET /telemetry?since=<seq>
+  →  { "seq": N, "oldest_seq": O, "boot": "<id>", "events": [ ... ] }
+```
+
+and the control plane's existing 10-second health loop appends new events to a
+relay file on the Pi. Consequences worth knowing:
 
 - The relay file lags reality by up to ~10 seconds.
-- The first pull seeds the cursor without replaying, so a Pi restart does not
-  duplicate old events.
 - No extra long-running process is required on the Mac.
+
+**The response carries continuity, not just position.** A cursor alone cannot
+distinguish *"nothing new"* from *"there is a hole"* — and a hole that looks
+like quiet is an event nobody ever sees. So the payload reports its own
+identity and extent alongside the newest event:
+
+| field | what it answers |
+|---|---|
+| `seq` | where the stream is now |
+| `oldest_seq` | the oldest the bounded ring still holds — a cursor below it means events were evicted unread |
+| `boot` | which gateway *process* issued these numbers; `seq` is in memory, so it restarts at 1 and "seq 1" from a new run is otherwise indistinguishable from the one already delivered |
+
+A second failure mode hides in the same blindness: after a gateway restart the
+new counter can legitimately read *lower* than the consumer's cursor, and if the
+new run has not yet produced an event, `seq` and `oldest_seq` both look
+harmless. The boot id is what makes that restart visible.
+
+**The relay file is the durable record.** Both halves keep no cursor state of
+their own across restarts; the consumer recovers its position *and* the boot id
+from the last line of the file it wrote, and resumes there. Three behaviours
+follow, and they are the whole of the restart contract:
+
+- A **control-plane** restart resumes rather than seeding past the events that
+  arrived while it was down. A genuinely fresh install (no relay file) still
+  seeds without replaying, so a first start does not dump 256 stale events onto
+  the screen.
+- A **gateway** restart is detected by the changed boot id and resynced from
+  `oldest_seq`, recovering what the ring still holds rather than skipping it.
+- Events the ring had already **evicted** cannot be recovered. They are reported
+  rather than silently omitted: the consumer writes a gap marker into the relay
+  stream, which the feeder renders as an `ERROR` line on the display. A restart
+  that cost nothing produces no marker — restarts are routine now, and a red
+  line on every one would train the reader to ignore the real ones.
 
 ---
 
@@ -226,6 +263,15 @@ gateway log on the Mac and piped it over SSH to a receiver on the Pi. It was
 fragile (required a forced-command entry on the Mac, plus a second Mac process)
 and was retired in favour of the pull described in §7.
 
+**Continuity in the telemetry response, not a persisted counter.** The
+alternative to reporting `oldest_seq` and a boot id was to persist the gateway's
+counter across restarts, which would have made the numbers monotonic and the
+problem disappear. It was rejected because it adds durable state to a process
+that is *supposed* to be disposable — a file to lose or corrupt on the Mac — for
+a benefit the response can carry for free. The consumer already had a durable
+record (its own relay file) and a way to reach the gateway's history; it lacked
+only the information to know when to use them.
+
 **Streaming as opt-in SSE.** Real chat clients stream by default and would
 otherwise render an empty reply. The gateway emits `chat.completion.chunk`
 frames when the client sets `stream: true`, and the frontend forwards the flag
@@ -268,15 +314,23 @@ These have each cost real debugging time.
 - **The health loop is on a 10-second timer.** A just-restarted gateway is
   reported unhealthy until the next probe. Tests that fire immediately after a
   restart will see spurious 503s.
-- **The telemetry cursor and the gateway's `seq` have different lifetimes**, and
-  that mismatch silently drops events. `seq` is in-memory on the Mac and resets
-  to zero at every gateway restart; the control plane's cursor persists on the
-  Pi. After a gateway restart the cursor can sit ahead of a counter that started
-  over, so nothing relays until `seq` climbs past the old value. The
-  seed-on-first-pull covers the control plane's own restarts but skips whatever
-  is already buffered at that instant. Making the services supervised turned
-  gateway restarts from rare into routine, which is what exposed this. See the
-  known-gap note in the Operations Manual §6.
+- **A cursor is not a continuity check.** The telemetry cursor and the gateway's
+  `seq` have different lifetimes — `seq` is in-memory on the Mac and restarts at
+  1, the consumer's cursor persists on the Pi — and for a long time the protocol
+  reported only `seq`, so a reset, an eviction, and a genuinely quiet stream were
+  all indistinguishable. Each mismatch then dropped events silently: the cursor
+  could sit ahead of a counter that had started over, and the seed-on-first-pull
+  skipped whatever was already buffered. **Making the services supervised turned
+  gateway restarts from rare into routine, which is what exposed it.** The fix is
+  the continuity fields in §7; the durable lesson is that *any* resume protocol
+  needs the consumer to be able to tell "nothing new" from "there is a hole."
+- **A zero sentinel cannot also be a legitimate value.** The consumer needed to
+  know whether its cursor meant anything yet, and encoded that as `cursor == 0`.
+  But a resync can legitimately land the cursor on zero, at which point "unknown"
+  and "known to be at zero" were the same number — so every later poll re-seeded
+  and swallowed the next event. It took a live test (a request that never reached
+  the relay file) to find. The fix was an explicit `known bool`; the sentinel had
+  been doing two jobs and only one of them was visible.
 - **Supervision is not systemd everywhere.** macOS has no systemd; the gateway is
   a launchd LaunchAgent in the GUI session. That session context is not
   incidental — it is how the gateway reaches Ollama, which runs as a GUI app.
