@@ -232,9 +232,24 @@ This is accepted rather than hidden, for three reasons: the alternative
 (cloud embedding) sends the content being embedded to a cloud endpoint, which
 is the wrong direction for this project; the alternative of disabling memory
 leaves the orchestrator amnesiac between units; and the cost is bounded by the
-slot, so it is a *serial* cost and never a memory spike. §9.2 requires it to be
-**measured** rather than assumed — the embedding model is small and the reload
-may be cheap against a prefill that already dominates.
+slot, so it is a *serial* cost rather than concurrent load. §9.2 required it to
+be **measured** rather than assumed. Measured on 2026-09-26 against
+`granite4:3b` with `embeddinggemma:latest` on the Mac: a warm chat turn took
+**0.10 s** (median of five, all with identical one-token output), the embedding
+**1.24 s**, and the same chat turn immediately after the embedding **1.54 s** —
+a reload penalty of **1.44 s**. Four consecutive chat turns with no embedding
+between them held at 0.08–0.12 s, so the penalty is the interleave and not
+noise.
+
+Two things that figure settles, both against the guess it replaces. The reload
+does **not** hide behind the prefill: at roughly 14× a warm turn it dominates a
+short turn rather than being absorbed by it. And it is that small only because
+the gateway pins `num_ctx` to 8192 with a q8_0 KV cache — the same reload with
+Ollama's default context measured 8.8 s and grew residency to 12.7 GB of this
+16 GB host, enough to trip the memory margin and make the gateway report
+unhealthy. The acceptance above therefore stands against the ~220 s turns it is
+written for, where 1.4 s is ~0.7% of one turn — not because prefill absorbs the
+reload.
 
 ## 5. Corrections to the record
 
@@ -319,10 +334,9 @@ Named so they cannot drift. Each is a consequence of §3 or §4.
 1. **Should `locality` reach the client?** Today it is telemetry-only. It could
    also appear in the chat response for a client that wants to know where its
    request ran. Not needed by any current consumer.
-2. **The embedding reload cost.** §4.7 accepts it; the figure is unmeasured.
-   It should be read from telemetry after the route is live, and if the
-   interleave is genuinely expensive the mitigation is on the caller's side
-   (batching, or fewer recall calls), not in an unmeasured policy change here.
+2. ~~The embedding reload cost.~~ **Measured 2026-09-26 — see §4.7.** The
+   mitigation, if one is wanted, is on the caller's side (batching, or fewer
+   recall calls); it is not an unmeasured policy change here.
 3. **Does the budgeter reject small embeds?** §4.4 keeps the check and accepts
    the risk. If `429`s appear against embeddings in telemetry, the exemption
    the research suggested becomes the fix.
