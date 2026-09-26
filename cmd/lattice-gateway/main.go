@@ -666,8 +666,15 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Ollama unhealthy", http.StatusServiceUnavailable)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+
+	// The ceiling is reported rather than configured twice: the gateway is the
+	// only process that knows what a context window costs in KV cache here, so
+	// it is the authority on the number and the control plane relays it.
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":      "ok",
+		"max_context": maxContext,
+	})
 }
 
 func main() {

@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -130,15 +131,24 @@ func monitorHealth() {
 	for {
 		for id, gw := range gateways {
 			resp, err := http.Get(gw.Endpoint + "/health")
-			if err != nil || (resp != nil && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound) {
-				healthMutex.Lock()
-				gatewayHealthy[id] = false
-				healthMutex.Unlock()
-			} else {
-				healthMutex.Lock()
-				gatewayHealthy[id] = true
-				healthMutex.Unlock()
+			healthy := err == nil && resp != nil &&
+				(resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound)
+			if healthy && resp.StatusCode == http.StatusOK {
+				var h struct {
+					MaxContext int `json:"max_context"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&h) == nil && h.MaxContext > 0 {
+					healthMutex.Lock()
+					gatewayMaxContext = h.MaxContext
+					healthMutex.Unlock()
+				}
 			}
+			if resp != nil {
+				resp.Body.Close()
+			}
+			healthMutex.Lock()
+			gatewayHealthy[id] = healthy
+			healthMutex.Unlock()
 			pullGatewayTelemetry(gw)
 		}
 		time.Sleep(10 * time.Second)
@@ -154,6 +164,11 @@ var (
 	gatewayTelemetrySeq  int64
 	gatewayTelemetryBoot string
 	gatewayRelayKnown    bool
+
+	// gatewayMaxContext is what the gateway reports it will honour, refreshed on
+	// each health poll. It is advertised by /capabilities so the limit is
+	// discoverable rather than invisible.
+	gatewayMaxContext int
 )
 
 func gatewayRelayPath() string {
@@ -459,6 +474,37 @@ func resolveModel(model, target string) string {
 	return c.local
 }
 
+// handleCapabilities exposes the client-facing namespace — the capability
+// aliases — plus the ceiling the gateway will actually honour. A probing client
+// that finds this stops concluding the API is absent, which is what happened
+// when the only route was the chat endpoint.
+func handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	healthMutex.RLock()
+	ctxCap := gatewayMaxContext
+	healthMutex.RUnlock()
+
+	ids := make([]string, 0, len(capabilities))
+	for id := range capabilities {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	list := make([]map[string]string, 0, len(ids))
+	for _, id := range ids {
+		list = append(list, map[string]string{
+			"id":    id,
+			"local": capabilities[id].local,
+			"cloud": capabilities[id].cloud,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"context_length": ctxCap,
+		"capabilities":   list,
+	})
+}
+
 func handleRoute(w http.ResponseWriter, r *http.Request) {
 	t0 := time.Now()
 	bodyBytes, _ := io.ReadAll(r.Body)
@@ -587,6 +633,7 @@ func main() {
 	go monitorHealth()
 	go dispatcher()
 	http.HandleFunc("/status", handleStatus)
+	http.HandleFunc("/capabilities", handleCapabilities)
 	http.HandleFunc("/route", handleRoute)
 	addr := latticeconfig.Env("LATTICE_CONTROL_ADDR", ":8082")
 	fmt.Printf("Lattice Control listening on %s...\n", addr)

@@ -80,6 +80,61 @@ var controlURL = latticeconfig.Env("LATTICE_CONTROL_URL", "http://127.0.0.1:8082
 
 var telemetryPath = latticeconfig.Env("LATTICE_FRONTEND_TELEMETRY", "/var/log/lattice/telemetry-frontend.jsonl")
 
+var capabilitiesURL = latticeconfig.Env("LATTICE_CONTROL_CAPABILITIES_URL", "http://127.0.0.1:8082/capabilities")
+
+// handleModels serves the client-facing namespace. It reports the capability
+// aliases because that is the namespace clients are expected to use, and the
+// real context ceiling because a limit the client cannot see is a limit it will
+// discover by being truncated.
+func handleModels(w http.ResponseWriter, r *http.Request) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(capabilitiesURL)
+	if err != nil {
+		http.Error(w, "Control plane unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, "Control plane: "+resp.Status, http.StatusServiceUnavailable)
+		return
+	}
+
+	var caps struct {
+		ContextLength int `json:"context_length"`
+		Capabilities  []struct {
+			ID string `json:"id"`
+		} `json:"capabilities"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&caps); err != nil {
+		http.Error(w, "Invalid capabilities from control plane", http.StatusInternalServerError)
+		return
+	}
+
+	data := make([]map[string]interface{}, 0, len(caps.Capabilities))
+	for _, c := range caps.Capabilities {
+		data = append(data, map[string]interface{}{
+			"id":             c.ID,
+			"object":         "model",
+			"created":        time.Now().Unix(),
+			"owned_by":       "lattice",
+			"context_length": caps.ContextLength,
+		})
+	}
+
+	// Explicit: Go sniffs this as text/plain without the header, and strict
+	// OpenAI clients reject that.
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"object": "list",
+		"data":   data,
+	})
+}
+
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
 func logTelemetry(t Telemetry) {
 	f, err := os.OpenFile(telemetryPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -177,6 +232,8 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	http.HandleFunc("/v1/chat/completions", handleChat)
+	http.HandleFunc("/v1/models", handleModels)
+	http.HandleFunc("/health", handleHealth)
 	addr := latticeconfig.Env("LATTICE_FRONTEND_ADDR", ":8080")
 	fmt.Printf("Lattice Frontend listening on %s...\n", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))

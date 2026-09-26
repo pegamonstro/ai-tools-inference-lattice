@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"net/http/httptest"
+	"testing"
+)
 
 // The client's model field means one of two things: a capability alias, in which
 // case policy picks the model, or a literal model name, in which case the client
@@ -37,5 +41,34 @@ func TestResolveModel(t *testing.T) {
 func TestResolveModelEmptyStaysEmpty(t *testing.T) {
 	if got := resolveModel("", "local"); got != "" {
 		t.Errorf("resolveModel(\"\", local) = %q, want \"\"", got)
+	}
+}
+
+func TestHandleCapabilitiesIsSortedAndReportsTheCeiling(t *testing.T) {
+	healthMutex.Lock()
+	gatewayMaxContext = 65536
+	healthMutex.Unlock()
+
+	rec := httptest.NewRecorder()
+	handleCapabilities(rec, httptest.NewRequest("GET", "/capabilities", nil))
+
+	var got struct {
+		ContextLength int `json:"context_length"`
+		Capabilities  []struct {
+			ID string `json:"id"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if got.ContextLength != 65536 {
+		t.Errorf("context_length = %d, want 65536", got.ContextLength)
+	}
+	if len(got.Capabilities) != 2 {
+		t.Fatalf("got %d capabilities, want 2", len(got.Capabilities))
+	}
+	// Sorted so the list a client sees does not change between calls.
+	if got.Capabilities[0].ID != "local-brain" || got.Capabilities[1].ID != "local-coder" {
+		t.Errorf("capabilities not sorted: %+v", got.Capabilities)
 	}
 }

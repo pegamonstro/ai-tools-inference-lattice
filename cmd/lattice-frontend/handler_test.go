@@ -169,3 +169,68 @@ func TestHandleChatCorrelatesAllThreePlanes(t *testing.T) {
 		t.Errorf("frontend telemetry does not carry %q: %v %s", header, err, logged)
 	}
 }
+
+func TestHandleModelsListsTheCapabilityNamespace(t *testing.T) {
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/capabilities" {
+			t.Errorf("frontend asked control for %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"context_length":65536,"capabilities":[{"id":"local-brain","local":"granite4:3b","cloud":"gemma4:31b-cloud"}]}`))
+	}))
+	defer control.Close()
+
+	old := capabilitiesURL
+	capabilitiesURL = control.URL + "/capabilities"
+	defer func() { capabilitiesURL = old }()
+
+	rec := httptest.NewRecorder()
+	handleModels(rec, httptest.NewRequest("GET", "/v1/models", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q — Go sniffs JSON as text/plain without an explicit header", ct)
+	}
+
+	var got struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID            string `json:"id"`
+			Object        string `json:"object"`
+			ContextLength int    `json:"context_length"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response is not OpenAI list JSON: %v", err)
+	}
+	if got.Object != "list" || len(got.Data) != 1 || got.Data[0].ID != "local-brain" {
+		t.Fatalf("unexpected model list: %+v", got)
+	}
+	if got.Data[0].ContextLength != 65536 {
+		t.Errorf("context_length = %d, want the gateway's real ceiling", got.Data[0].ContextLength)
+	}
+}
+
+// Discovery must fail closed rather than invent a namespace: a client that gets
+// a model list it cannot use is worse served than one that is told to wait.
+func TestHandleModelsFailsClosed(t *testing.T) {
+	old := capabilitiesURL
+	capabilitiesURL = "http://127.0.0.1:1/capabilities"
+	defer func() { capabilitiesURL = old }()
+
+	rec := httptest.NewRecorder()
+	handleModels(rec, httptest.NewRequest("GET", "/v1/models", nil))
+	if rec.Code == http.StatusOK {
+		t.Error("expected a failure status when control is unreachable")
+	}
+}
+
+func TestHandleHealth(t *testing.T) {
+	rec := httptest.NewRecorder()
+	handleHealth(rec, httptest.NewRequest("GET", "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+}
