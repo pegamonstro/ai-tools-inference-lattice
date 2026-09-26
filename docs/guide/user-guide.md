@@ -222,18 +222,20 @@ gateway is healthy.
 | `500` | `ollama returned status N` | The local provider failed (e.g. model not found, provider down). |
 | `400` | unmarshal error | Malformed JSON body. |
 
-**Not every failure reaches the operations display.** Only the gateway telemetry
-stream carries an `error` field; the control and frontend streams have no such
-field and are written on their success path alone. Two consequences worth knowing
-when you go looking for a failed request:
+**Every failure reaches the operations display.** Each layer writes a telemetry
+line on every exit path — success and refusal alike — and carries the reason in
+an `error` field beside the model name. A failed request is therefore visible
+rather than disappearing.
 
-- **A refusal is in no stream at all.** A `409`, or any other non-`200` from the
-  control plane, returns before either layer writes telemetry — so the denial is
-  visible to the client and nowhere else.
-- **A request you cancelled may lose its frontend line.** The frontend writes its
-  line *after* proxying rather than deferring it, so a client that disconnects
-  after the target has already answered can leave a control line with no frontend
-  twin. The target's own stream still shows it, and can even show it as a success.
+- **A refusal is recorded by the layer that refused it**, naming the model, so a
+  `409` appears once from the control plane and once from the frontend, and is
+  rendered as an error rather than as a route.
+- **A request you cancelled still leaves a frontend line.** The write is
+  deferred, so a client that disconnects mid-response no longer takes the
+  frontend's line with it. That line shows the elapsed time and *no* error: the
+  client going away is not a failure of the request.
+- **A layer that never ran has no line.** A fail-closed `503` is written by the
+  control plane alone, and a target's own failure by that target alone.
 
 ---
 

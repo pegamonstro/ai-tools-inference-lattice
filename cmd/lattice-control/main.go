@@ -560,10 +560,10 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 
 	var req Request
 
-	// Every exit path draws exactly one line, refusal included. A refusal is the
-	// event the routing policy exists to produce — the denial is the point — and
-	// it used to be the one event with no telemetry at all: each failure path
-	// returned before the write below.
+	// Deferred so that every exit path draws exactly one line. A refusal is the
+	// event the routing policy exists to produce, so a failure path that returned
+	// before this write would leave the policy unobservable at the moment it
+	// acted.
 	tele := Telemetry{}
 	defer func() {
 		tele.RequestID = req.Routing.RequestID

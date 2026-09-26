@@ -167,12 +167,10 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	var req Request
 	var tExecStart time.Time
 
-	// The line is deferred, not written after proxying, because the proxy aborts
-	// the handler when its write to the client fails — a client that disconnects
-	// mid-response used to take the frontend line with the unwind, leaving a
-	// control line with no twin. Every exit path now draws exactly one line,
-	// refusal included: a refusal is the event the routing policy exists to
-	// produce, and it used to reach no stream at all.
+	// Deferred, not written after proxying: the proxy aborts the handler when its
+	// write to the client fails, and a client that disconnects mid-response would
+	// take a trailing line with the unwind. Deferring also covers the refusal
+	// paths — and a refusal is the event the routing policy exists to produce.
 	tele := Telemetry{}
 	defer func() {
 		// Keyed even when the body never parsed: a line the display cannot group

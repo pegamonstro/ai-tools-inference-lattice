@@ -70,6 +70,7 @@ source. Defaults are shown; override in each process's environment (see §5).
 | `LATTICE_GATEWAY_URL` | `http://localhost:8081` | where the gateway lives (set to the Mac's tailnet address) |
 | `LATTICE_OLLAMA_URL` | `http://localhost:11434` | the cloud Ollama endpoint on this host |
 | `LATTICE_GATEWAY_TELEMETRY_LOCAL` | `/var/log/lattice/telemetry-gateway.jsonl` | relay file for gateway telemetry pulled over HTTP |
+| `LATTICE_CONTROL_TELEMETRY` | `/var/log/lattice/telemetry-control.jsonl` | control plane telemetry sink |
 
 ### Frontend (RPi4)
 
@@ -132,10 +133,6 @@ fires on a stalled server but never cuts a long answer short.
 > the queue — so a long bound no longer risks pinning the gateway's single
 > inference slot. A client that goes away *while queued for the slot* is recorded
 > in gateway telemetry as `client_cancelled_while_queued`.
-
-> **Note.** The control plane's telemetry sink is the one hard-coded path
-> (`/var/log/lattice/telemetry-control.jsonl`); it is not environment-driven.
-> Everything else above is.
 
 ---
 
@@ -278,8 +275,15 @@ Three streams, all keyed by `request_id`, all under `/var/log/lattice/`:
 
 The feeder ([`deploy/bee-feed-lattice.sh`](../../deploy/bee-feed-lattice.sh))
 tails all three with `tail -n0 -F` and branches on which key is present — not on
-which file the line came from. Error events carry an `error` field and render as
-`<id> <model> ERROR <message>`.
+which file the line came from.
+
+Every stream carries an `error` field and a `model`, and the feeder checks
+`error` **before** it identifies the stream. That order is load-bearing: a refusal
+carries no target, so branching on the stream first would render a denial as a
+successful route — on the display as a success, which is worse than absent. An
+error renders as `<id> <model> ERROR <message>`, and a refusal is written by the
+layer that refused it, so a `409` reaches the screen once from control and once
+from the frontend.
 
 ### Why the gateway file is written by the control plane
 
@@ -392,7 +396,7 @@ vm_stat | grep -i swap          # Swapouts is the wear-relevant counter
 | A request fails and the model is the problem | the literal model sent does not exist at the decided target | the error names the model (`ollama pull <model>`); a capability alias lets policy pick a model that exists |
 | An agent's tool call comes back with empty `content` | the model answered with a tool call (`finish_reason: "tool_calls"`) rather than text, or the gateway's Ollama tool translation regressed | expected when `finish_reason` is `tool_calls`; otherwise check `finish_reason` and the gateway's tool translation — [gateway spec §3.1](../specs/lattice-gateway.md) |
 | Nothing on the Bee screen | feeder not running, or relay file not yet created | run the feeder in the foreground with `2>/tmp/feeder.log`; remember journald isn't persisted here |
-| Nothing on the Bee screen for a request you know failed | **both layers write telemetry only on their success path.** A refusal returns before the write, and the frontend proxies *then* logs rather than deferring — so a request whose client disconnects after the target has answered loses its frontend line | check the layers individually: control's decision may be in `telemetry-control.jsonl` with no frontend twin, and a refused request is in neither |
+| Nothing on the Bee screen for a request you know failed | a layer writes only what it saw, so a layer that never ran has no line | check the layers individually: a refusal is written by control *and* the frontend, a fail-closed `503` by control alone, and a target's own failure by the gateway — see §6 |
 | A `telemetry-gap … ERROR` line on the Bee screen | the gateway's ring evicted events before the pull reached them, or a restart lost some | expected and self-healing — the line *is* the report. Frequent occurrences mean the gateway is restarting often; check `launchctl print gui/$UID/com.lattice.gateway` |
 | Unit won't start after an env edit | the `EnvironmentFile` is missing or unreadable (it is **not** optional) | check `~/.config/lattice/*.env` exists and is owned by the service account |
 

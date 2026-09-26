@@ -156,8 +156,11 @@ Design rules:
   list — never teaching a binary about the socket.
 - **Branch on content, not filename.** The feeder identifies an event by which
   key it carries, because one `tail` covers all three files.
-- **Errors are events too.** A gateway error carries an `error` field and is
-  rendered distinctly, so failures appear on the display instead of vanishing.
+- **Errors are events too.** Every stream writes a line on every exit path and
+  carries an `error` field, and the feeder checks `error` before it identifies
+  the stream — a refusal carries no target, so the reverse order would show a
+  denial as a successful route. A layer that never ran is the only legitimate
+  absence.
 
 **Crossing the host boundary.** The Mac and the Pi share no filesystem, so
 gateway telemetry is *pulled*: the gateway buffers its last 256 events and
