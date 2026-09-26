@@ -86,7 +86,7 @@ source. Defaults are shown; override in each process's environment (see §5).
 |---|---|---|
 | `LATTICE_GATEWAY_ADDR` | `:8081` | gateway listen address |
 | `LATTICE_OLLAMA_URL` | `http://localhost:11434` | local Ollama |
-| `LATTICE_GATEWAY_MAX_CONTEXT` | `65536` | context window ceiling (advertised in `/health` as `max_context`) |
+| `LATTICE_GATEWAY_MAX_CONTEXT` | `32768` | context window ceiling (advertised in `/health` as `max_context`) |
 | `LATTICE_GATEWAY_KV_CACHE` | `q8_0` | KV cache quantisation |
 | `LATTICE_GATEWAY_MEMORY_MARGIN_MB` | `1536` | free RAM the gateway refuses to cross (see §7) |
 | `LATTICE_GATEWAY_TELEMETRY` | `telemetry-gateway.jsonl` | gateway's local event buffer sink (CWD-relative) |

@@ -68,7 +68,7 @@ id — together with the context ceiling the gateway will honour:
 
 ```json
 {
-  "context_length": 65536,
+  "context_length": 32768,
   "capabilities": [
     { "id": "local-brain", "local": "granite4:3b", "cloud": "gemma4:31b-cloud" },
     { "id": "local-coder", "local": "hermes3:8b", "cloud": "deepseek-v4-pro:cloud" }

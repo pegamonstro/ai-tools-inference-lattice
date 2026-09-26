@@ -66,11 +66,11 @@ translates Ollama's reply back into OpenAI's shape:
 `GET /health` returns JSON:
 
 ```json
-{ "status": "ok", "max_context": 65536 }
+{ "status": "ok", "max_context": 32768 }
 ```
 
 `max_context` is the ceiling the gateway will honour
-(`LATTICE_GATEWAY_MAX_CONTEXT`, default `65536`). It is reported rather than
+(`LATTICE_GATEWAY_MAX_CONTEXT`, default `32768`). It is reported rather than
 configured twice: the gateway is the only process that knows what a context
 window costs in KV cache on this hardware, so it is the authority on the number
 and the Control plane relays it — from here into `GET /capabilities`

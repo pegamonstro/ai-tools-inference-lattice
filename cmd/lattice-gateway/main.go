@@ -521,9 +521,10 @@ func writeSSEChunk(w io.Writer, id string, created int64, model, content, finish
 }
 
 // maxContext is the hard ceiling on num_ctx, configurable via
-// LATTICE_GATEWAY_MAX_CONTEXT. The default is 65536 to match what agent
-// runtimes carry by default, but a larger ceiling is a larger KV cache, so
-// this value is only trusted once a swap measurement says it is affordable.
+// LATTICE_GATEWAY_MAX_CONTEXT. The default is 32768: the 65536 raise that
+// matched what agent runtimes carry was measured and rejected — one large local
+// inference inflated the Mac's resident set to 13 GB and wrote ~2.2 GB to swap,
+// against 9.2 GB and ~40 MB at 32768.
 var maxContext = maxContextTokens()
 
 func maxContextTokens() int {
@@ -532,11 +533,9 @@ func maxContextTokens() int {
 			return n
 		}
 	}
-	// 65536 matches what agent runtimes carry by default. It is a memory
-	// decision as much as a formatting one: a larger ceiling is a larger KV
-	// cache, so this value is only trusted once the swap measurement below
-	// says it is affordable.
-	return 65536
+	// 32768 is the measured ceiling. 65536 was implemented and measured and
+	// drove the Mac into swap, so the smaller value is the affordable one.
+	return 32768
 }
 
 // kvCacheType quantizes Ollama's KV cache (q8_0 vs the f16 default), roughly
@@ -565,7 +564,7 @@ func resolveMaxTokens(req Request) int {
 // ceiling (low=4096, default=8192, high=maxContext), so "high" lets an agent
 // reason over more tokens without forcing every request to pay for them.
 func contextWindow(messages []interface{}, maxTokens int, providerParams map[string]interface{}) int {
-	// Default ceiling is the configured max (65536): large agent prompts must be
+	// Default ceiling is the configured max (32768): large agent prompts must be
 	// allowed to grow, otherwise Ollama truncates them. reasoning_effort=low is
 	// the only knob that deliberately restricts it (for memory-sensitive calls).
 	ceiling := maxContext

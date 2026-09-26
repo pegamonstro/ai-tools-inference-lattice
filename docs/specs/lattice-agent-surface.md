@@ -39,7 +39,7 @@ Verified against the running system on 2026-09-26.
 | 2 | An unrecognised `model` yields an **empty `model_name`** | A literal name fails obscurely, with no model in telemetry. |
 | 3 | No `/v1/models`, no `/health` | A probing client gets 404 on all of them and concludes the API is absent — **this has already happened**: an external agent tested `/health` and `/` and reported that Lattice has no chat endpoint, which is false. |
 | 4 | `routing.request_id` is required for correlation | A client that omits it produces blank-id telemetry lines. |
-| 5 | Gateway caps context at `32768`; agent runtimes are configured for `65536` | Truncation the client cannot see. |
+| 5 | Gateway caps context at `32768`; agent runtimes are configured for `65536` | Truncation the client cannot see. The cap stays at `32768` **deliberately** — the raise was measured and rejected (§6). The invisible-truncation limitation stands. |
 
 Gap 1 is the fatal one: an agent without `tools` cannot act.
 
@@ -120,12 +120,15 @@ always identifiable on the Bee screen.
 
 ### 3.5 Context ceiling
 
-The gateway ceiling rises to **`65536`** to match what agent runtimes carry.
+The gateway ceiling stays at **`32768`**.
 
 This is a memory decision, not a formatting one: a larger ceiling means a larger
 KV cache, and the Mac's SSD is the thing the margin exists to protect
-(handbook §7). The change is accepted with that understood, and it is the one
-item here that needs a **measurement** before it is trusted — see §6.
+(handbook §7). The `65536` raise was implemented and measured, and rejected —
+one large-prompt local inference at `65536` inflated the resident set to 13 GB
+(against 9.2 GB at `32768`) and wrote ~2.2 GB to swap (against ~40 MB at
+`32768`). The `32768` ceiling is the one the hardware can afford; the
+measurement is recorded in §6.
 
 The ceiling must also appear in `/v1/models`, so the limit is discoverable
 rather than invisible.
@@ -157,7 +160,7 @@ rather than invisible.
 | 4 — the gateway translates, it does not decide | held — no routing moves into it |
 | 5 — no new infrastructure | **held** — no new process, no inventory, no bus |
 | 6 — Bee is not modified | held |
-| 7 — protect the Mac's SSD | **at risk** — the 65536 ceiling raises KV-cache size; measured in §6 |
+| 7 — protect the Mac's SSD | **held** — the 65536 raise was measured and rejected; the ceiling stays 32768 (§6) |
 | 8 — no usernames/hostnames/addresses | held |
 | 9 — telemetry shares one key | **strengthened** — the key can no longer be blank |
 
@@ -180,10 +183,12 @@ Automated (`lattice-frontend`):
 Manual, on the pair:
 
 6. A tool-calling request completes end-to-end against a local model.
-7. **Memory measurement.** With the ceiling at `65536`, one local inference must
-   leave `Swapouts` flat (`vm_stat | grep -i swap`). If it does not, the ceiling
-   is wrong and comes back down — this is the acceptance test for §3.5, and it
-   outranks the convenience that motivated it.
+7. **Memory measurement — RUN, FAILED at 65536.** One large-prompt inference
+   (~34k tokens, `hermes3:8b`) per ceiling: at `65536` the resident set reached
+   13 GB and wrote ~2.2 GB to swap (541,792 pages), while at `32768` it stayed at
+   9.2 GB with ~40 MB written (9,895 pages). The ceiling is reverted to `32768`
+   — this acceptance test for §3.5 outranks the convenience that motivated the
+   raise, and it decided the outcome.
 
 ---
 
