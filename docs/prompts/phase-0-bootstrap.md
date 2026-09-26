@@ -24,7 +24,7 @@ Routing model (already decided): routing is a function of `privacy` (LOCAL_ONLY 
 
 ### 1. Establish the repository
 
-Working directory is `/Users/archcore/Projects/LLM-router`. Do the following, and stop if the directory is already a git repo (report and continue):
+Working directory is the project root (`<project-root>`). Do the following, and stop if the directory is already a git repo (report and continue):
 
 1. `git init` if not already a repo.
 2. Create `README.md` — a charter: project name (Lattice / Inference Lattice), one-paragraph purpose, the three-host topology, the phase list (0–10), and a pointer to `docs/lattice-design.md` as the continuity doc.
