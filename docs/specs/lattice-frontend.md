@@ -20,7 +20,7 @@ and rewrites only what routing requires:
 - **Step 1**: For every request, call the Control Plane `/route` endpoint. Assign
   the request id first (§2.3), so Control logs the same id the other two planes
   will use.
-- **Step 2**: Receive the `Decision` (`target`, `endpoint`, `model_name`).
+- **Step 2**: Receive the `Decision` (`target`, `endpoint`, `model_name`, `locality`).
 - **Step 3**: Rewrite the request — exactly two edits, nothing else:
   - Set the target URL to `endpoint + "/v1/chat/completions"` for a chat request,
     or `endpoint + "/v1/embeddings"` for an embedding request.
