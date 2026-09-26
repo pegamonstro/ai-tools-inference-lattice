@@ -125,44 +125,81 @@ before `local` requests route again.
 
 ## 5. Process supervision
 
-> **Current state, verified 2026-09-26: nothing supervises the servers.**
-> `lattice-control`, `lattice-frontend`, and the Mac's `lattice-gateway` are all
-> plain long-running processes, started by hand. They are **not** systemd units
-> on either host — there is no system unit and no user unit for them. They
-> survive a shell exit (they reparent to `systemd --user`) but **they will not
-> restart after a crash or a reboot.**
+All four services are supervised. Nothing has to be started by hand, and
+everything comes back after a crash or a reboot.
 
-Only one service is managed: the Bee feeder, as a user unit on the Pi.
+| service | host | supervisor | unit |
+|---|---|---|---|
+| `lattice-control` | Pi | systemd **user** unit (runs as the lattice account) | `lattice-control.service` |
+| `lattice-frontend` | Pi | systemd **user** unit | `lattice-frontend.service` |
+| `lattice-gateway` | Mac | launchd **LaunchAgent** | `com.lattice.gateway` |
+| Bee feeder | Pi | systemd user unit | `bee-feed-lattice.service` |
+
+macOS has no systemd. The gateway's supervisor is a per-user **LaunchAgent**
+loaded into the GUI session — which is also why it can reach the Ollama.app
+instance, since that runs as a GUI app rather than a system service.
+
+Both Pi units are `WantedBy=default.target` and enabled, and the account has
+`Linger=yes`, so they start at boot without anyone logging in. All three run
+with an automatic-restart policy (`Restart=always` / `KeepAlive`).
+
+### Managing the Pi services
 
 ```bash
-systemctl --user status  bee-feed-lattice.service
-systemctl --user restart bee-feed-lattice.service
+systemctl --user status  lattice-control.service
+systemctl --user restart lattice-frontend.service
 ```
 
-`journalctl` for user units is **not persisted** on this host. To debug the
-feeder, run it in the foreground and capture stderr yourself.
+From another account on the same host, `--machine` targets the owner's user
+manager:
 
-Because the servers are unsupervised, "is the process still running?" is the
-first question in any incident — and restarting a host brings the lattice down
-until someone starts the binaries again. Adding units for the three servers
-(and a launch agent on the Mac) is the obvious next hardening step.
+```bash
+sudo systemctl --user --machine=<lattice-account>@.host restart lattice-control.service
+```
+
+### Managing the Mac gateway
+
+```bash
+launchctl print      gui/$UID/com.lattice.gateway
+launchctl kickstart -k gui/$UID/com.lattice.gateway
+```
+
+Logs are at `~/Library/Logs/lattice/lattice-gateway.{out,err}.log`.
+
+### Installing
+
+Both are installed from the repo:
+
+```bash
+./deploy/install-macos.sh          # on the Mac
+```
+
+The Pi units are copied into `~/.config/systemd/user/` with a matching
+`~/.config/lattice/*.env`, then `systemctl --user daemon-reload` and
+`enable --now`. They use `%h`, so no path needs editing — the install script
+exists only on the Mac, where launchd cannot expand variables and the plist
+needs absolute paths substituted.
 
 ### Deploying a new binary
 
-Overwriting a *running* binary fails with `Text file busy`. Kill the process
-first, then copy, then start the new binary:
+Overwriting a *running* binary fails with `Text file busy`. Stop the service,
+copy, start:
 
 ```bash
-pkill -x lattice-frontend          # or kill the exact PID — see the warning below
+systemctl --user stop lattice-frontend
 cp bin/lattice-frontend ~/bin/lattice-frontend.new
 mv ~/bin/lattice-frontend.new ~/bin/lattice-frontend
-~/bin/lattice-frontend &           # relaunch (see §4 for required env)
+systemctl --user start lattice-frontend
 ```
 
-> **Kill by PID, not by pattern.** `pkill -f "<name>"` matches the *full command
-> line*, including your own SSH session if its command text contains the name —
-> which kills your session mid-deploy. `pkill -x` matches the process name
-> exactly and is safe; when in doubt, read the PID from `ps` and `kill` it.
+On the Mac, `launchctl bootout gui/$UID/com.lattice.gateway` first (or just
+re-run `install-macos.sh`, which boots out before re-bootstrapping).
+
+> **Kill by PID, not by pattern.** When you must kill a process directly,
+> `pkill -f "<name>"` matches the *full command line* — including your own SSH
+> session when its command text contains that name, so it can kill your session
+> mid-deploy. (It has happened.) Use the service manager instead; if you must
+> kill, take the PID from `systemctl show -p MainPID` and `kill` it.
 
 Rollback is the same procedure with the previous binary — keep a copy before
 deploying.
@@ -207,6 +244,17 @@ only new events to the relay file. The first pull seeds the cursor without
 replaying history. This replaced an earlier SSH-pipe relay and requires **no
 long-running process on the Mac** beyond the gateway itself.
 
+> **Known gap: events are lost across restarts.** The gateway's `seq` counter
+> lives in memory and resets to zero when the gateway restarts, while the control
+> plane's cursor persists on the Pi. After a gateway restart the control plane
+> can therefore sit ahead of a counter that started over, silently relaying
+> nothing until the gateway's `seq` climbs past the old value. Separately, the
+> control plane's seed-on-first-pull skips anything already buffered at that
+> moment. Both are telemetry-only — inference is unaffected — but a dropped
+> event never appears on the Bee screen. Restarting the **control plane** as well
+> as the gateway clears the stranded cursor in the meantime; a proper fix is
+> tracked in the project's task list.
+
 ### Installing the feeder
 
 `deploy/bee-feed-lattice.service` is a user unit; `%h` expands to the feeder
@@ -250,16 +298,20 @@ vm_stat | grep -i swap          # Swapouts is the wear-relevant counter
 
 | symptom | cause | fix |
 |---|---|---|
-| `503 No healthy local gateway found` | gateway down, or the Pi's 10s health loop hasn't re-probed it yet | start the gateway; wait ~10s; check `/status` |
+| `503 No healthy local gateway found` | gateway down, or the Pi's 10s health loop hasn't re-probed it yet | the unit restarts it; wait ~10s; check `/status` |
 | `429 Memory pressure` | free RAM below the margin | close memory hogs on the Mac, or lower the context window |
 | `500 ollama returned status 404` | model id not pulled / not present in Ollama | `ollama pull <model>`, verify the capability map |
-| `Text file busy` on deploy | the binary is running | kill the process (by PID), then copy — see §5 |
+| `Text file busy` on deploy | the binary is running | stop the service, copy, start — see §5 |
 | Frontend returns empty reply to a streaming client | a rebuild dropped the `stream` field somewhere on the proxy path | verify the field survives frontend → gateway |
 | Cloud request returns empty model | client sent a real model name instead of a capability alias | use `local-brain` / `local-coder` |
 | Nothing on the Bee screen | feeder not running, or relay file not yet created | run the feeder in the foreground with `2>/tmp/feeder.log`; remember journald isn't persisted here |
+| Telemetry stops after a restart | gateway `seq` reset while the control plane's cursor stayed ahead | restart `lattice-control` too — see §6 |
+| Unit won't start after an env edit | the `EnvironmentFile` is missing or unreadable (it is **not** optional) | check `~/.config/lattice/*.env` exists and is owned by the service account |
 
-**Killing processes.** Prefer killing by PID. `pkill -f "<name>"` can match the
-SSH session whose own command line contains the name, killing your own session.
+**Killing processes.** Prefer the service manager. When you must kill directly,
+use the PID — `pkill -f "<name>"` can match the SSH session whose own command
+line contains the name, killing your own session. `systemctl show -p MainPID`
+gives the right PID without pattern-matching.
 
 **Piping into Python.** A long-running `python3` in a pipeline needs `-u`, or
 its output buffers and the pipeline stalls.
@@ -268,8 +320,9 @@ its output buffers and the pipeline stalls.
 
 ## 9. Maintenance checklist
 
-- [ ] all three server processes are running (`lattice-control`, `lattice-frontend`
-      on the Pi, `lattice-gateway` on the Mac) — nothing restarts them for you
+- [ ] all three services active (`systemctl --user is-active lattice-control
+      lattice-frontend` on the Pi; `launchctl print gui/$UID/com.lattice.gateway`
+      on the Mac)
 - [ ] `/status` reports the gateway healthy
 - [ ] feeder unit active; all three telemetry files exist and are growing
 - [ ] `bin/` on both hosts matches the current commit

@@ -1,0 +1,18 @@
+[Unit]
+Description=Lattice frontend (OpenAI-compatible entry point)
+Documentation=https://github.com/pegamonstro/ai-tools-inference-lattice
+After=network-online.target lattice-control.service
+Wants=network-online.target lattice-control.service
+
+[Service]
+Type=simple
+# The frontend cannot serve a request without a routing decision, so it wants the
+# control plane up first (see the ordering above). Keep it separate from control
+# anyway: a control-plane restart should not take the public listener down.
+EnvironmentFile=%h/.config/lattice/lattice-frontend.env
+ExecStart=%h/bin/lattice-frontend
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

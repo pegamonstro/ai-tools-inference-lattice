@@ -231,6 +231,20 @@ otherwise render an empty reply. The gateway emits `chat.completion.chunk`
 frames when the client sets `stream: true`, and the frontend forwards the flag
 untouched. Both halves are required — see the gotcha below.
 
+**Two supervisors, not one.** The Pi services are systemd *user* units; the Mac
+gateway is a launchd LaunchAgent. The split is forced — macOS has no systemd —
+but user-scope was chosen deliberately on the Pi too: the binaries already live
+in the owning account's home, and that account has `Linger=yes`, so boot-time
+start needs no root, no new service account, and no relocation. Until
+2026-09-26 all three ran as plain processes and **nothing** restarted them after
+a crash or a reboot.
+
+**Configuration via `EnvironmentFile`, never inline.** Host-specific values
+(namely the gateway's address) live outside the unit so no tailnet address is
+ever committed. The file is deliberately *not* optional: the built-in default
+points the gateway at localhost, which on the Pi is the Pi itself — a
+misconfiguration that would otherwise surface only as unexplained 503s.
+
 ---
 
 ## 11. Gotchas
@@ -249,15 +263,33 @@ These have each cost real debugging time.
   not the gateway's defaults; `num_ctx` and friends must be included in the
   request to take effect.
 - **`LATTICE_GATEWAY_TELEMETRY` is CWD-relative**, unlike every other path.
-  Start the gateway from a known directory.
+  Start the gateway from a known directory — the LaunchAgent pins
+  `WorkingDirectory` for exactly this reason.
 - **The health loop is on a 10-second timer.** A just-restarted gateway is
   reported unhealthy until the next probe. Tests that fire immediately after a
   restart will see spurious 503s.
+- **The telemetry cursor and the gateway's `seq` have different lifetimes**, and
+  that mismatch silently drops events. `seq` is in-memory on the Mac and resets
+  to zero at every gateway restart; the control plane's cursor persists on the
+  Pi. After a gateway restart the cursor can sit ahead of a counter that started
+  over, so nothing relays until `seq` climbs past the old value. The
+  seed-on-first-pull covers the control plane's own restarts but skips whatever
+  is already buffered at that instant. Making the services supervised turned
+  gateway restarts from rare into routine, which is what exposed this. See the
+  known-gap note in the Operations Manual §6.
+- **Supervision is not systemd everywhere.** macOS has no systemd; the gateway is
+  a launchd LaunchAgent in the GUI session. That session context is not
+  incidental — it is how the gateway reaches Ollama, which runs as a GUI app.
 - **journald is not persisted** for user units on the Pi. Debug the feeder by
   running it in the foreground; the servers write no logs you can query after
   the fact.
 - **`pkill -f` can kill your own SSH session** when its command line contains
-  the pattern. Kill by PID.
+  the pattern — including a remote command you sent over SSH that merely
+  *mentions* the process name. Kill by PID (`systemctl show -p MainPID`).
+- **`pgrep -x` silently fails past 15 characters.** `pgrep -x lattice-frontend`
+  matches nothing (the name is 16 chars) and prints a warning you may not read,
+  so a "kill by name" loop quietly skips it. `lattice-gateway` (15) is fine;
+  `lattice-frontend` is not. This is a procps limit, not a Lattice one.
 
 ---
 

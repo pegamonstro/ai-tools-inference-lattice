@@ -8,3 +8,4 @@
 *.jsonl
 *.py
 /bin/
+/deploy/*.env

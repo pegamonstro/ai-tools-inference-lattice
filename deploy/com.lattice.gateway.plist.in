@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lattice gateway — macOS LaunchAgent template.
+
+  macOS has no systemd; the equivalent of a user service is a per-user agent
+  loaded into the GUI session. install-macos.sh substitutes the two placeholders
+  below and installs the result to ~/Library/LaunchAgents/.
+
+  This is a TEMPLATE, not a plist: launchd cannot expand shell variables, so the
+  paths must be literal — and a literal /Users/<name>/... path would put a
+  username in a public repo. Hence the substitution step.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lattice.gateway</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO_ROOT__/bin/darwin-arm64/lattice-gateway</string>
+    </array>
+
+    <!--
+      Must be the repo root. LATTICE_GATEWAY_TELEMETRY is CWD-relative (the one
+      relative path in the whole system), so a different working directory sends
+      telemetry somewhere the control plane never polls — the request still
+      succeeds and the event silently never reaches the Bee display.
+    -->
+    <key>WorkingDirectory</key>
+    <string>__REPO_ROOT__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/lattice-gateway.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/lattice-gateway.err.log</string>
+</dict>
+</plist>

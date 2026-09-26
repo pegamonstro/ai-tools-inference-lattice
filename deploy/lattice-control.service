@@ -1,0 +1,20 @@
+[Unit]
+Description=Lattice control plane (routing brain)
+Documentation=https://github.com/pegamonstro/ai-tools-inference-lattice
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Host-specific values (notably LATTICE_GATEWAY_URL) live in the EnvironmentFile
+# rather than in this unit, so no tailnet address is ever committed. The file is
+# deliberately NOT optional: the built-in default points the gateway at
+# localhost, which on this host is the Pi itself — a misconfiguration that would
+# surface only as mysterious 503s. Better to fail to start.
+EnvironmentFile=%h/.config/lattice/lattice-control.env
+ExecStart=%h/bin/lattice-control
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
