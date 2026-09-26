@@ -14,7 +14,20 @@ Lattice must ensure that high-priority interactive requests are not blocked by l
 
 ## 2. Scheduling Logic
 
-The Control plane replaces the simple semaphore with a **Priority Queue**:
+**Status (2026-09-26): the queue exists; the gate it feeds does not.** Items 1–2
+are implemented — `handleRoute` sends `interactive` requests to
+`highPriorityQueue` and everything else to `lowPriorityQueue`, and `dispatcher()`
+drains high before low — but **only on the cloud path**: a request resolved to
+local never reaches the dispatcher. Item 3 is not implemented.
+
+The priority is also, today, inert. The dispatcher takes a slot from a
+`semaphore` of 3 around a send to a *buffered* response channel that never
+blocks, so the slot is acquired and released in the same instant and nothing
+queues behind anything. Priority only decides order when demand exceeds the
+gate, and there is no gate — see [specs/lattice-control.md](lattice-control.md)
+§4 for the same defect from the concurrency side.
+
+The intended design:
 
 1. **Incoming Request**:
    - If `latency_class == interactive` $\rightarrow$ Push to `high_priority_queue`.
@@ -23,7 +36,7 @@ The Control plane replaces the simple semaphore with a **Priority Queue**:
    - Always check `high_priority_queue` first.
    - If a cloud slot is available, dispatch the oldest high-priority request.
    - If no high-priority requests exist, dispatch the oldest low-priority request.
-3. **Cloud Spill**:
+3. **Cloud Spill** *(not implemented)*:
    - If `high_priority_queue` grows too large, the system may decide to spill some interactive requests to Local (Mac) if acceptable, or reject with `429`.
 
 ## 3. Implementation Plan

@@ -18,7 +18,7 @@ Lattice solves this by separating **Decision** from **Execution**.
 - **Privacy-First Routing**: Hard-gated `LOCAL_ONLY` requests never leave the local network.
 - **Latency-Aware Scheduling**: Interactive turns are routed to the cloud for speed; batch jobs are routed to the Mac for cost-efficiency.
 - **Hardware Sovereignty**: Prevents SSD wear on the Mac by gating local concurrency based on RAM availability.
-- **Cloud Concurrency Gating**: Strictly enforces provider limits (e.g., max 3 parallel cloud calls) to prevent subscription throttling.
+- **Cloud Concurrency Gating** *(planned — not yet enforced)*: the design caps parallel cloud calls (e.g. 3) to avoid provider throttling. Today cloud concurrency is bounded only by the provider; local concurrency *is* gated (a single inference slot plus the RAM margin).
 
 ## 🛠️ Protocol: `inference.v1`
 Lattice extends the OpenAI API by adding a `routing` object to requests:
@@ -34,6 +34,11 @@ Lattice extends the OpenAI API by adding a `routing` object to requests:
   }
 }
 ```
+
+Of the three `privacy` values, only `LOCAL_ONLY` changes routing today: it is the
+hard gate that refuses cloud-tagged models and fails closed when no local gateway
+is available. `LOCAL_PREFERRED` and `CLOUD_ALLOWED` are accepted but treated
+alike — the request is routed by its `latency_class`.
 
 ---
 

@@ -18,13 +18,13 @@ A lightweight distributed inference **control and execution** system for a three
 
 | Host | Role | Inference |
 |---|---|---|
-| **RPi4** (Debian 13, aarch64) | Control plane — policy, capability, health, fallback, concurrency gate | Cloud-only client |
+| **RPi4** (Debian 13, aarch64) | Control plane — policy, capability, health | Cloud-only client |
 | **Mac** (Apple M1, 16 GB) | Lattice Gateway — the ONLY substantive local-LLM host | `granite4:3b` (main), `gemma3:4b`, `command-r7b:7b`, `hermes3:8b` |
 | **RPi3** (Alpine 3.24, OpenRC) | Security appliance + homelab services | Inference client only; never computes local models |
 
 ## Routing model
 
-Routing is a function of `privacy` (LOCAL_ONLY / LOCAL_PREFERRED / CLOUD_ALLOWED), `latency_class` (interactive → cloud-first; batch → local-first), `parallelism`, and `cost`. Cloud = fast, max 3 models parallel, burns token budget. Local LLM = free + unlimited parallel, but slow (~10 tok/s warm, worse cold/long-context). See [docs/lattice-design.md](docs/lattice-design.md).
+Routing is a function of `privacy` (`LOCAL_ONLY` is a hard gate; the other levels are accepted but **not distinguished**), `latency_class` (interactive → cloud; batch → local), and the model's own cloud tag. Cloud = fast but burns token budget; local = free but slow (~10 tok/s warm, worse cold/long-context). Two things the design describes are **not implemented**: no fallback to cloud when the Mac is unavailable (a local-resolved request returns `503`), and no 3-parallel cloud cap. See [docs/lattice-design.md](docs/lattice-design.md) for the design and the recorded drifts.
 
 ## Phases
 

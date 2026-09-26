@@ -62,6 +62,8 @@ Routing is a function of four inputs:
 
 ### Policy table
 
+The design distinguishes three privacy levels:
+
 | privacy | latency_class | route |
 |---|---|---|
 | `LOCAL_ONLY` | any | local only; fail closed if unavailable (accept latency) |
@@ -70,13 +72,38 @@ Routing is a function of four inputs:
 | `CLOUD_ALLOWED` | interactive | cloud (fast), subject to 3-parallel cap |
 | `CLOUD_ALLOWED` | batch | local preferred (free); cloud if local unavailable or explicit override |
 
-**Fallback:** the only fallback for local is **cloud (rpi4)**. Mac unavailable → `LOCAL_PREFERRED` / `CLOUD_ALLOWED` fall back to cloud; `LOCAL_ONLY` fails closed (never cloud).
+> **Recorded drift (2026-09-26): only the first row is implemented.** The code
+> distinguishes `LOCAL_ONLY` from *everything else* and nothing further —
+> `LOCAL_PREFERRED` and `CLOUD_ALLOWED` are not separate behaviours, and the
+> "cloud budget exhausted" and "explicit override" branches do not exist. The
+> implemented decision is three rows: `LOCAL_ONLY` → local (or `503`); a
+> cloud-tagged model → cloud; otherwise `interactive` → cloud and `batch` →
+> local. `requiredCapability()` in `cmd/lattice-control/main.go` is the
+> authority, and [handbook §6](handbook/architecture-handbook.md) states the
+> same table.
+
+**Fallback:** *(not implemented)* the intent was that Mac-unavailable falls back
+to cloud for `LOCAL_PREFERRED` / `CLOUD_ALLOWED`. **Nothing falls back.** A
+request resolved to local with no healthy gateway returns `503 No healthy local
+gateway found`, whatever its privacy level — so today `batch` traffic fails
+closed alongside `LOCAL_ONLY`, which is *not* the designed behaviour. Only the
+latency class and the model tag move traffic to cloud; gateway health never
+does. The one refusal that names the model is the `409`: `LOCAL_ONLY` with a
+cloud-tagged model, a pair neither target can satisfy.
 
 **Swap Avoidance**: All local routing is subject to a memory-pressure gate. Requests that would force the Mac into swap must be queued or degraded to cloud (if privacy allows) to preserve SSD health.
 
 ### Cloud concurrency gate
 
-Cloud is the scarce resource. The Control plane enforces the **3-parallel cap**: excess concurrent interactive cloud requests are queued; non-interactive excess is degraded to local (if privacy allows).
+**Recorded drift:** cloud is the scarce resource and the design calls for a
+**3-parallel cap** — excess concurrent interactive cloud requests queued,
+non-interactive excess degraded to local. **The cap is not enforced.**
+`cloudActive` is incremented around a send to a *buffered* channel that never
+blocks, so the counter is back to zero before the frontend has begun proxying
+and three requests can never be in flight; `GET /status` reports
+`"cloud_active": 0` always. Cloud concurrency is bounded only by the cloud
+endpoint. [specs/lattice-control.md](specs/lattice-control.md) §4 records the
+shape of the fix.
 
 ### Hybrid (local + cloud) split
 
@@ -96,10 +123,13 @@ Measured (see `docs/baseline.md`): `granite4:3b` ≈ 10 tok/s warm — a 100-tok
 ## 5. Privacy levels
 
 - `LOCAL_ONLY` — only Mac local inference is acceptable; if unavailable, **fail**; never silently send to cloud.
-- `LOCAL_PREFERRED` — prefer local; cloud allowed as fallback/upgrade.
-- `CLOUD_ALLOWED` — any provider is acceptable.
+- `LOCAL_PREFERRED` — prefer local; cloud allowed as fallback/upgrade. *(Not implemented — see §4.)*
+- `CLOUD_ALLOWED` — any provider is acceptable. *(Not distinguished from `LOCAL_PREFERRED` — see §4.)*
 
-Privacy is a hard gate, evaluated before latency/cost.
+Privacy is a hard gate, evaluated before latency/cost. Only `LOCAL_ONLY` is
+enforced today; every other value falls through to the latency class, so
+`LOCAL_PREFERRED` and `CLOUD_ALLOWED` are the same request as far as the control
+plane is concerned.
 
 ---
 
