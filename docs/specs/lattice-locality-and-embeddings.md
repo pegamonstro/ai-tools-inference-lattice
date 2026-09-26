@@ -236,20 +236,23 @@ slot, so it is a *serial* cost rather than concurrent load. §9.2 required it to
 be **measured** rather than assumed. Measured on 2026-09-26 against
 `granite4:3b` with `embeddinggemma:latest` on the Mac: a warm chat turn took
 **0.10 s** (median of five, all with identical one-token output), the embedding
-**1.24 s**, and the same chat turn immediately after the embedding **1.54 s** —
-a reload penalty of **1.44 s**. Four consecutive chat turns with no embedding
-between them held at 0.08–0.12 s, so the penalty is the interleave and not
-noise.
+**1.23 s**, and the same chat turn immediately after the embedding **1.54 s** —
+a reload penalty of **1.44 s**. The five warm turns — the 2.96 s first call
+carried the model load and is excluded — all fell between 0.08 s and 0.12 s,
+including the two taken after the second interleave, so the penalty is the
+interleave and not drift.
 
 Two things that figure settles, both against the guess it replaces. The reload
 does **not** hide behind the prefill: at roughly 14× a warm turn it dominates a
-short turn rather than being absorbed by it. And it is that small only because
-the gateway pins `num_ctx` to 8192 with a q8_0 KV cache — the same reload with
-Ollama's default context measured 8.8 s and grew residency to 12.7 GB of this
-16 GB host, enough to trip the memory margin and make the gateway report
-unhealthy. The acceptance above therefore stands against the ~220 s turns it is
-written for, where 1.4 s is ~0.7% of one turn — not because prefill absorbs the
-reload.
+short turn rather than being absorbed by it. And it is that small largely
+because the gateway keeps the context small: `contextWindow` sizes `num_ctx` to
+the prompt, starting at 2048 and doubling until the prompt fits, with the KV
+cache quantized to q8_0. This one-token workload got 2048 — the value the
+telemetry line records — not the 32768 ceiling. The same reload at Ollama's
+default context measured 8.8 s and grew residency to 12.7 GB of this 16 GB host,
+enough to trip the memory margin and make the gateway report unhealthy. The
+acceptance above therefore stands against the ~220 s turns it is written for,
+where 1.4 s is under 1% of one turn — not because prefill absorbs the reload.
 
 ## 5. Corrections to the record
 
