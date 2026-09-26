@@ -254,7 +254,8 @@ That figure is also the smallest case, and the acceptance is not written for it.
 A build-loop turn carries the ~13k-token harness tax measured for that loop,
 which resolves to the **32768** ceiling — `contextWindow` doubles 2048 → 32768
 before that prompt fits. Measured at 32768 with the same q8_0 cache, the reload
-is **2.2 s** (median of three: 2.21, 2.58, 1.84 s), with the resident model at
+is **2.2 s** (three runs: 1.84, 2.21, 2.58 s — median 2.21), with the resident
+model at
 4.9 GB against 2.2 GB at 2048. So the cost is **2.2 s per interleave** at the
 shape the caller actually runs. That is still about 1% of a ~220 s turn, which
 is the acceptance's claim — but it now rests on a figure taken at that shape
