@@ -22,11 +22,14 @@ and rewrites only what routing requires:
   will use.
 - **Step 2**: Receive the `Decision` (`target`, `endpoint`, `model_name`).
 - **Step 3**: Rewrite the request — exactly two edits, nothing else:
-  - Set the target URL to `endpoint + "/v1/chat/completions"`.
+  - Set the target URL to `endpoint + "/v1/chat/completions"` for a chat request,
+    or `endpoint + "/v1/embeddings"` for an embedding request.
   - Update the `model` field in the JSON body to `model_name`.
-  - Delete any client-supplied `routing`, then re-inject the frontend-issued
-    envelope **only on the local path**: cloud endpoints speak plain OpenAI and
-    reject it.
+  - Delete any client-supplied `routing` unconditionally, then re-inject the
+    frontend-issued envelope **only on the chat path and only when the resolved
+    target's `locality` is `local`**: cloud endpoints speak plain OpenAI and
+    reject it, and an embeddings body gets no envelope at all, whatever the
+    locality.
 - **Step 4**: Forward the request and return the response.
 
 **Every other field passes through untouched** — `tools`, `tool_choice`,
@@ -63,14 +66,31 @@ indistinguishable from a non-existent one to any client that probes first.
 
 ### 2.3 Correlation
 
-The header is set on every `/v1/chat/completions` response the frontend proxies
-to a target — including a failure response from that target. It is **not** set on
-the discovery endpoints (`GET /v1/models`, `GET /health`), nor on an error
-returned before proxying (a malformed body, or a control-plane failure).
+The header is set on every `/v1/chat/completions` and `/v1/embeddings` response
+the frontend proxies to a target — including a failure response from that target.
+It is **not** set on the discovery endpoints (`GET /v1/models`, `GET /health`),
+nor on an error returned before proxying (a malformed body, or a control-plane
+failure).
+
+The same id is also sent **outbound** to the target on both routes, so a layer
+that cannot read a routing envelope still keys its line from the header: the
+gateway's embeddings line, having no envelope to read, is keyed from it.
 
 The value is the client's `routing.request_id` when it supplied one, and a
 generated id otherwise, so the key is never blank. It is assigned **before** the
 Control call, so the same id appears in all three telemetry streams.
+
+### 2.4 The embeddings route
+
+`POST /v1/embeddings` shares the chat flow — parse, ask Control, proxy — and
+differs only in what it forwards and what it injects.
+
+**The upstream path is route-dependent.** A chat request is forced to
+`/v1/chat/completions`; an embedding request to `/v1/embeddings`. **The routing
+envelope is injected only where a routing contract exists** — that is, the chat
+path, and only when the resolved target's `locality` is `local`. An embeddings
+body is forwarded without one, so its correlation id travels in an
+`X-Request-Id` header instead, which the frontend sets on both routes.
 
 ## 3. Exit Test (Phase 4)
 

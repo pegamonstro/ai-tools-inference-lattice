@@ -105,6 +105,25 @@ requests die with `500 context deadline exceeded` — rather than failing safe. 
 [`operations-manual.md`](../manual/operations-manual.md) §3.1 for the sizing
 rationale and how to retune it.
 
+### 3.4 The embeddings route
+
+`POST /v1/embeddings` is a **forwarding** route, not a translation. Ollama
+implements `/v1/embeddings` natively, so the body is passed through untouched and
+the response relayed with its status and content type, which makes the response
+shape, its base64 encoding and its precision Ollama's by construction. The chat
+path's context machinery (`num_ctx`, `resolveMaxTokens`, `kv_cache_type`) is
+deliberately not applied: an embedding model has a fixed small context and no
+output to predict. The request takes the same one inference slot as a chat turn,
+and the memory-budgeter check is kept, so a refusal is a visible `429` rather than
+an out-of-memory event.
+
+### 3.5 Telemetry locality
+
+Every line carries `locality: "local"`, stamped inside `logTelemetry` rather than
+by callers, so no call site can omit it. The gateway has no `target` field and
+does not gain one: its provenance is this process, and locality is the one
+dimension the three streams share.
+
 ## 4. Implementation Plan
 
 - **Language**: Go.

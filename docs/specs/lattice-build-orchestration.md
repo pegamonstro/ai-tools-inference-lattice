@@ -159,19 +159,17 @@ Anti-drift rule 5 ("no speculative infrastructure") is binding here.
 
 Each was checked against a running system on 2026-09-26, not inferred.
 
-1. **`/v1/embeddings` is not served.** Through the frontend it returns
-   `404 page not found`. Hermes's `auxiliary.embedding` points at that endpoint,
-   and since both Hermes providers are the frontend, **no direct path to local
-   inference exists**. Embedding underpins memory/recall, which the orchestrator
-   needs. Either the frontend and gateway gain an embeddings passthrough, or
-   `auxiliary.embedding` is repointed and memory is disabled. *Unresolved.*
-2. **No token fields are emitted.** Neither `telemetry-control.jsonl` nor
-   `telemetry-frontend.jsonl` carries `prompt_tokens`, `completion_tokens`, or
-   any equivalent. Spec'd token accounting is **unmeasurable**, and any tool
-   claiming it today would report zero. This is a prerequisite for
-   [lattice-observability.md](lattice-observability.md) §2, not for this spec's
-   orchestration — but the orchestrator's economy model (§2) is estimated from
-   one measurement until it is fixed.
+1. **`/v1/embeddings` is served.** It returned `404` through the frontend, which
+   broke an agent runtime's `auxiliary.embedding` and therefore the orchestrator's
+   memory. **Resolved 2026-09-26** — the route is served. See
+   [lattice-locality-and-embeddings.md](lattice-locality-and-embeddings.md) §4.
+2. **Token accounting is partly measurable, and the earlier claim that it is
+   "unmeasurable" was overstated.** The gateway emits `prompt_tokens` and
+   `completion_tokens`, and control relays them onto the Pi verbatim, so **local**
+   spend is measurable today. What is genuinely absent is **cloud** spend: the
+   frontend reverse-proxies the response untouched and never decodes its `usage`.
+   Corrected 2026-09-26; see
+   [lattice-locality-and-embeddings.md](lattice-locality-and-embeddings.md) §5.1.
 3. **The model aliases must exist on the target.** Lattice advertises
    `local-brain` and `local-coder` at `context_length: 32768`. Hermes's
    `local-brain` alias resolves to `llama3.2:3b` via `ollama-mac`, and that name
@@ -228,10 +226,10 @@ Against `docs/lattice-design.md` §6:
 
 ## 9. Open questions
 
-1. Embeddings (§5.1): add passthrough, or repoint and disable memory?
+1. ~~`/v1/embeddings` through Lattice~~ — **closed 2026-09-26**, the route is
+   served (lattice-locality-and-embeddings.md §4).
 2. Token accounting (§5.2): which layer should emit it — the frontend, which
    sees the full response, or the gateway, which sees it first?
-3. Target→locality classification has no rule for an unknown target. Two
-   literal names (`mac-gateway`, `ollama-cloud-secondary`) are hardcoded today.
-   Should locality become a property the control plane reports, instead of a
-   name the tools must recognise?
+3. ~~Whether a target's locality should be a reported field~~ — **closed
+   2026-09-26.** It should, and it is: every routing decision and every telemetry
+   line now carries `locality` (lattice-locality-and-embeddings.md §3).

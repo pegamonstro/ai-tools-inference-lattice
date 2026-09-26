@@ -77,6 +77,20 @@ LOCAL_ONLY cannot be served by the cloud-only model "minimax-m3:cloud"
 It is never promoted to cloud (the privacy rule), and never re-routed to a Mac
 that does not have the model (an anonymous 404).
 
+### 2.2 `locality` on the decision and the telemetry line
+
+This subsection reports the **target's** class, as distinct from §2.1, which
+decides the **model's**: a cloud-tagged model sent to the cloud yields a target
+whose `locality` is `cloud`, and the same tag never produces a local target.
+
+`locality` — `local` | `cloud` | `unknown` — is derived from the registry the
+target was chosen from (`gateways` → local, `providers` → cloud) and reported on
+both the decision and the telemetry line. It sits beside `target`, which stays the
+source of truth. Refusals and fail-closed decisions name no target and therefore
+report `unknown`. The values are the same strings the registry entries already use
+in `Capabilities`, so there is no translation table between them. See
+[lattice-locality-and-embeddings.md](lattice-locality-and-embeddings.md) §3.
+
 ## 3. Capability Registry
 
 A map of model *aliases* (capabilities) to their local and cloud model names:

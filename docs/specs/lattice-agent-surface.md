@@ -137,8 +137,15 @@ rather than invisible.
 
 ## 4. Non-goals
 
-- **`/v1/embeddings`.** Deferred. Embeddings carry no routing decision, and the
-  consumer that prompted this work already has a working embedding path.
+- **`/v1/embeddings`** — **retracted as a non-goal 2026-09-26.** It was deferred on
+  the grounds that "the consumer that prompted this work already has a working
+  embedding path". That path *was* the bypass — pointing directly at the Mac's
+  Ollama — and the bypass was deliberately closed when both agent-runtime
+  providers were repointed at the frontend. The premise is gone, so the non-goal
+  goes with it. The route is now served by the frontend and the gateway; it is
+  local-only by platform, because Ollama refuses embeddings on its cloud
+  passthrough. See
+  [lattice-locality-and-embeddings.md](lattice-locality-and-embeddings.md) §4.
 - **A separate shim process.** Explicitly rejected: it would be a second public
   contract, drift from the frontend, and duplicate a route that already exists.
 - **A model inventory in control.** That is infrastructure, and invariant 5

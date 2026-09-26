@@ -49,9 +49,19 @@ To keep the system "deterministic" and avoid "speculative infrastructure" (Rule 
   frontend to `/var/log/lattice/telemetry-frontend.jsonl`
   (`LATTICE_FRONTEND_TELEMETRY`).
 - **Summary Tool**: A small Go utility `lattice-stats` that reads the log and prints a summary:
-  - Average latency per target.
-  - Total token spend (Cloud).
-  - Routing distribution (% cloud vs % local).
+  - **Routing distribution (% cloud vs % local)** — read from the `locality` field
+    each stream now carries. Do not derive it from `target`: parsing a name for
+    semantics is what the field exists to retire
+    (lattice-locality-and-embeddings.md §3).
+  - **Total token spend** — **local** spend is available: the gateway emits
+    `prompt_tokens` and `completion_tokens` and control relays them onto the Pi
+    verbatim. **Cloud** spend is not: the frontend never decodes the response's
+    `usage`. This is a named, open gap, not a general absence
+    (lattice-locality-and-embeddings.md §5.1).
+  - **Average latency per target** — unchanged, and `target` remains the key. Note
+    that control's `decision_time_s` is routing time (~0.002 s) and the frontend's
+    `total_time_s` is end-to-end (~2 s); pooling them into one figure produces an
+    average true of neither layer.
 
 ## 3. Hardening
 
