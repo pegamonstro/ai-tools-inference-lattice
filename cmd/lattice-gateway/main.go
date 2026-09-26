@@ -521,9 +521,9 @@ func writeSSEChunk(w io.Writer, id string, created int64, model, content, finish
 }
 
 // maxContext is the hard ceiling on num_ctx, configurable via
-// LATTICE_GATEWAY_MAX_CONTEXT. It exists so agents that legitimately need a
-// large window can raise it, while the default (32768) still caps the KV cache
-// well below Ollama's 131072-token default.
+// LATTICE_GATEWAY_MAX_CONTEXT. The default is 65536 to match what agent
+// runtimes carry by default, but a larger ceiling is a larger KV cache, so
+// this value is only trusted once a swap measurement says it is affordable.
 var maxContext = maxContextTokens()
 
 func maxContextTokens() int {
@@ -532,7 +532,11 @@ func maxContextTokens() int {
 			return n
 		}
 	}
-	return 32768
+	// 65536 matches what agent runtimes carry by default. It is a memory
+	// decision as much as a formatting one: a larger ceiling is a larger KV
+	// cache, so this value is only trusted once the swap measurement below
+	// says it is affordable.
+	return 65536
 }
 
 // kvCacheType quantizes Ollama's KV cache (q8_0 vs the f16 default), roughly
