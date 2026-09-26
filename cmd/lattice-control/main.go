@@ -35,6 +35,9 @@ type Decision struct {
 	Target    string `json:"target"`
 	Endpoint  string `json:"endpoint"`
 	ModelName string `json:"model_name"`
+	// Locality sits beside Target, never instead of it: Target stays the source
+	// of truth and the key the per-target views are built on.
+	Locality string `json:"locality"`
 }
 
 type Telemetry struct {
@@ -44,6 +47,7 @@ type Telemetry struct {
 	Model        string  `json:"model"`
 	Privacy      string  `json:"privacy"`
 	LatencyClass string  `json:"latency_class"`
+	Locality     string  `json:"locality"`
 	Error        string  `json:"error,omitempty"`
 }
 
@@ -98,6 +102,22 @@ func init() {
 		Endpoint:     gatewayURL,
 		Capabilities: []string{"local"},
 	}
+}
+
+// localityFor reports which registry a target was chosen from. It is derived
+// rather than tracked per branch so that no exit path can forget it, and so that
+// a new target is classified by where it was registered rather than by its name.
+//
+// The values are the same strings the registries already use in Capabilities, so
+// there is one vocabulary and no translation table to drift.
+func localityFor(targetID string) string {
+	if _, ok := gateways[targetID]; ok {
+		return "local"
+	}
+	if _, ok := providers[targetID]; ok {
+		return "cloud"
+	}
+	return "unknown"
 }
 
 var (
@@ -570,6 +590,10 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 		tele.DecisionTime = time.Since(t0).Seconds()
 		tele.Privacy = req.Routing.Privacy
 		tele.LatencyClass = req.Routing.LatencyClass
+		// Derived from the target the body settled on, so every exit path is
+		// covered by construction: the refusal paths never set a target, and
+		// localityFor("") is "unknown".
+		tele.Locality = localityFor(tele.Target)
 		logTelemetry(tele)
 	}()
 
@@ -662,6 +686,7 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 		Target:    targetID,
 		Endpoint:  endpoint,
 		ModelName: modelName,
+		Locality:  localityFor(targetID),
 	}
 
 	if requiredCap == "cloud" {

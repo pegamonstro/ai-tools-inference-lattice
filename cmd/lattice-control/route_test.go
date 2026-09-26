@@ -46,6 +46,9 @@ func TestHandleRouteRecordsARefusal(t *testing.T) {
 	if got.Target != "" {
 		t.Errorf("target = %q, want empty — no target was chosen", got.Target)
 	}
+	if got.Locality != "unknown" {
+		t.Errorf("locality = %q, want unknown — a refusal chose no target", got.Locality)
+	}
 }
 
 // The fail-closed path is the sovereignty guarantee, and it was invisible for the
@@ -87,6 +90,9 @@ func TestHandleRouteRecordsAFailClosedDecision(t *testing.T) {
 	}
 	if got.Model != "granite4:3b" {
 		t.Errorf("model = %q, want the model that could not be served", got.Model)
+	}
+	if got.Locality != "unknown" {
+		t.Errorf("locality = %q, want unknown — no target was reachable", got.Locality)
 	}
 }
 
@@ -245,5 +251,81 @@ func TestHandleCapabilitiesIsSortedAndReportsTheCeiling(t *testing.T) {
 	// Sorted so the list a client sees does not change between calls.
 	if got.Capabilities[0].ID != "local-brain" || got.Capabilities[1].ID != "local-coder" {
 		t.Errorf("capabilities not sorted: %+v", got.Capabilities)
+	}
+}
+
+// Locality is a property of the registry a target was chosen from, not of its
+// name. Keying it on names is what every consumer had to re-derive, and it
+// misclassifies silently the moment a target is added or renamed.
+func TestLocalityFor(t *testing.T) {
+	cases := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{"a gateway is local", "mac-gateway", "local"},
+		{"a provider is cloud", "ollama-cloud-primary", "cloud"},
+		{"the second provider is cloud too", "ollama-cloud-secondary", "cloud"},
+		// A refusal picks no target, and a refusal is an event the cloud/local
+		// split must still be able to account for.
+		{"no target is unknown", "", "unknown"},
+		{"an unrecognised target is unknown", "somewhere-else", "unknown"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := localityFor(tc.target); got != tc.want {
+				t.Errorf("localityFor(%q) = %q, want %q", tc.target, got, tc.want)
+			}
+		})
+	}
+}
+
+// The local path is asserted end to end — decision and telemetry — because it is
+// the one path that completes without the response channel a test cannot start.
+func TestHandleRouteReportsLocalLocality(t *testing.T) {
+	old := telemetryPath
+	telemetryPath = t.TempDir() + "/telemetry-control.jsonl"
+	defer func() { telemetryPath = old }()
+
+	healthMutex.Lock()
+	oldHealthy := gatewayHealthy
+	gatewayHealthy = map[string]bool{"mac-gateway": true}
+	healthMutex.Unlock()
+	defer func() {
+		healthMutex.Lock()
+		gatewayHealthy = oldHealthy
+		healthMutex.Unlock()
+	}()
+
+	body := `{"model":"granite4:3b","messages":[],"routing":{"privacy":"LOCAL_ONLY","request_id":"req-local"}}`
+	rec := httptest.NewRecorder()
+	handleRoute(rec, httptest.NewRequest("POST", "/route", strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var decision Decision
+	if err := json.Unmarshal(rec.Body.Bytes(), &decision); err != nil {
+		t.Fatalf("response is not a decision: %v (%s)", err, rec.Body.String())
+	}
+	if decision.Locality != "local" {
+		t.Errorf("decision locality = %q, want local", decision.Locality)
+	}
+	if decision.Target != "mac-gateway" {
+		t.Errorf("target = %q, want the healthy gateway", decision.Target)
+	}
+
+	logged, err := os.ReadFile(telemetryPath)
+	if err != nil {
+		t.Fatalf("no telemetry line: %v", err)
+	}
+	var got Telemetry
+	if err := json.Unmarshal(bytes.TrimSpace(logged), &got); err != nil {
+		t.Fatalf("telemetry is not one JSON line: %v (%s)", err, logged)
+	}
+	if got.Locality != "local" {
+		t.Errorf("telemetry locality = %q, want local", got.Locality)
 	}
 }
