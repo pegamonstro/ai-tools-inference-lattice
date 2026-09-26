@@ -800,6 +800,90 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(res)
 }
 
+// handleEmbeddings forwards an embedding request to Ollama's own OpenAI-compatible
+// /v1/embeddings and writes one telemetry line.
+//
+// It does not reuse handleInference. That handler decodes the chat Request shape
+// and applies the generation context machinery — contextWindow, num_ctx,
+// resolveMaxTokens, kv_cache_type — none of which an embedding model has: it has a
+// fixed small context and no output to predict. Ollama implements the endpoint
+// natively, so nothing is translated and the response's shape, its base64
+// encoding and its precision are Ollama's by construction.
+//
+// The request carries no routing envelope, so its id arrives as a header. A
+// caller that reaches this port directly leaves the id empty, exactly as a direct
+// caller to /v1/chat/completions leaves it empty today.
+func handleEmbeddings(w http.ResponseWriter, r *http.Request) {
+	t0 := time.Now()
+	requestID := r.Header.Get("X-Request-Id")
+
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if !budgeter.CanAccommodate() {
+		fmt.Println("  Memory pressure: available RAM below safety margin. Rejecting embedding to avoid swap.")
+		logTelemetry(Telemetry{
+			RequestID: requestID,
+			Elapsed:   time.Since(t0).Seconds(),
+			Error:     "memory_pressure",
+		})
+		http.Error(w, "Local memory pressure: available RAM below safety margin", http.StatusTooManyRequests)
+		return
+	}
+
+	// The same single slot chat takes, for the same reason: with one model
+	// resident, a concurrent embed evicts the resident chat model — which is the
+	// swap pressure this project has already paid for once.
+	if !acquireSlot(r.Context()) {
+		logTelemetry(Telemetry{
+			RequestID: requestID,
+			Elapsed:   time.Since(t0).Seconds(),
+			Error:     "client_cancelled_while_queued",
+		})
+		return
+	}
+	defer func() { <-inferenceSlots }()
+
+	upstream, err := http.NewRequestWithContext(r.Context(), "POST",
+		ollamaURL+"/v1/embeddings", bytes.NewReader(bodyBytes))
+	if err != nil {
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	upstream.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: ollamaTimeout()}
+	resp, err := client.Do(upstream)
+	if err != nil {
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	te := Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds()}
+	// The upstream status is the client's to interpret: an empty encoding_format
+	// or a token-array input is Ollama's rejection, and masking it as a gateway
+	// fault would send the caller looking in the wrong place.
+	if resp.StatusCode != http.StatusOK {
+		te.Error = fmt.Sprintf("upstream status %d", resp.StatusCode)
+	}
+
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	if _, copyErr := io.Copy(w, resp.Body); copyErr != nil && te.Error == "" {
+		te.Error = copyErr.Error()
+	}
+	logTelemetry(te)
+}
+
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	// Health check: is Ollama responsive AND is memory okay?
 	if !budgeter.CanAccommodate() {
@@ -823,6 +907,18 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// newRouter holds the route table so it can be asserted in a test: a route that
+// exists in the source but is never registered is, from the control plane's
+// side, indistinguishable from one that does not exist.
+func newRouter() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", handleInference)
+	mux.HandleFunc("/v1/embeddings", handleEmbeddings)
+	mux.HandleFunc("/health", handleHealth)
+	mux.HandleFunc("/telemetry", handleTelemetry)
+	return mux
+}
+
 func main() {
 	budgeter = NewMemoryBudgeter()
 	ollamaURL = latticeconfig.Env("LATTICE_OLLAMA_URL", "http://localhost:11434")
@@ -831,10 +927,7 @@ func main() {
 	providers["ollama"] = &OllamaProvider{Endpoint: ollamaURL}
 	providerMutex.Unlock()
 
-	http.HandleFunc("/v1/chat/completions", handleInference)
-	http.HandleFunc("/health", handleHealth)
-	http.HandleFunc("/telemetry", handleTelemetry)
 	addr := latticeconfig.Env("LATTICE_GATEWAY_ADDR", ":8081")
 	fmt.Printf("Lattice Gateway listening on %s (Dynamic Memory Budgeting active)\n", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	log.Fatal(http.ListenAndServe(addr, newRouter()))
 }

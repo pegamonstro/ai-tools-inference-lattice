@@ -8,7 +8,7 @@ import (
 )
 
 // The gateway is the local executor, so its locality is a constant. It is set
-// inside logTelemetry rather than at each call site: there are five call sites,
+// inside logTelemetry rather than at each call site: there are several call sites,
 // and a field one of them forgets is a field that vanishes from the split
 // without anyone noticing, because the line still looks complete.
 func TestLogTelemetryStampsLocalLocality(t *testing.T) {
