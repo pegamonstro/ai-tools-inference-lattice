@@ -26,6 +26,7 @@ type Routing struct {
 type Request struct {
 	Model    string        `json:"model"`
 	Messages []interface{} `json:"messages"`
+	Stream   bool          `json:"stream"`
 	Routing  Routing       `json:"routing"`
 }
 
@@ -97,6 +98,10 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	proxyBody := make(map[string]interface{})
 	proxyBody["model"] = decision.ModelName
 	proxyBody["messages"] = req.Messages
+	// Pass streaming through: the gateway honors it by replying with SSE, and the
+	// reverse proxy below flushes text/event-stream frames as they arrive. Dropping
+	// it here would silently downgrade streaming clients to an empty unary reply.
+	proxyBody["stream"] = req.Stream
 
 	// Forward request_id + provider_params to the local gateway (the translation
 	// layer). Cloud targets speak plain OpenAI and reject the routing envelope,

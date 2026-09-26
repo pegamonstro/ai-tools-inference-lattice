@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -29,6 +30,7 @@ type Routing struct {
 type Request struct {
 	Model    string        `json:"model"`
 	Messages []interface{} `json:"messages"`
+	Stream   bool          `json:"stream"`
 	Routing  Routing       `json:"routing"`
 }
 
@@ -199,6 +201,13 @@ type Provider interface {
 	Name() string
 }
 
+// StreamingProvider is implemented by providers that can emit an OpenAI-compatible
+// SSE stream. handleInference type-asserts to it only when the client set stream:
+// true, so providers without streaming keep working unary.
+type StreamingProvider interface {
+	ExecuteStream(req Request, w http.ResponseWriter) (res *Response, committed bool, err error)
+}
+
 type OllamaProvider struct {
 	Endpoint string
 }
@@ -276,6 +285,148 @@ func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 			TotalTokens:      native.PromptEvalCount + native.EvalCount,
 		},
 	}, nil
+}
+
+// ExecuteStream runs the same request as Execute but streams the result to w as
+// OpenAI-compatible SSE, translating Ollama's newline-delimited JSON events into
+// chat.completion.chunk frames. It returns the assembled Response so the caller
+// can log telemetry identically to the unary path.
+//
+// committed reports whether the SSE status and headers were already sent. Before
+// that point the caller can still surface a failure as an HTTP error; after it the
+// response is a 200 and the only thing left is to stop writing.
+func (p *OllamaProvider) ExecuteStream(req Request, w http.ResponseWriter) (*Response, bool, error) {
+	targetURL, _ := url.Parse(p.Endpoint + "/api/chat")
+	maxTokens := resolveMaxTokens(req)
+
+	ollamaReq := map[string]interface{}{
+		"model":    req.Model,
+		"messages": req.Messages,
+		"stream":   true,
+		"options": map[string]interface{}{
+			"num_ctx":       contextWindow(req.Messages, maxTokens, req.Routing.ProviderParams),
+			"num_predict":   maxTokens,
+			"kv_cache_type": kvCacheType,
+		},
+	}
+	body, _ := json.Marshal(ollamaReq)
+
+	httpReq, _ := http.NewRequest("POST", targetURL.String(), bytes.NewBuffer(body))
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Unlike the unary path this client has no fixed timeout: a streamed answer can
+	// legitimately run long, and the caller's request context governs cancellation.
+	resp, err := (&http.Client{}).Do(httpReq)
+	if err != nil {
+		return nil, false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, fmt.Errorf("ollama returned status %d", resp.StatusCode)
+	}
+
+	// Ollama accepted the request, so from here the reply is committed to SSE and no
+	// longer expressible as an HTTP error status.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+
+	id := "chatcmpl-" + req.Routing.RequestID
+	created := time.Now().Unix()
+	model := req.Model
+	promptTokens, completionTokens := 0, 0
+	var content strings.Builder
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var ev struct {
+			Model   string `json:"model"`
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			PromptEvalCount int  `json:"prompt_eval_count"`
+			EvalCount       int  `json:"eval_count"`
+			Done            bool `json:"done"`
+		}
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+		if ev.Model != "" {
+			model = ev.Model
+		}
+		if ev.Done {
+			// Token counts only arrive with the terminal event in streaming mode.
+			promptTokens, completionTokens = ev.PromptEvalCount, ev.EvalCount
+			break
+		}
+		if ev.Message.Content == "" {
+			continue
+		}
+		content.WriteString(ev.Message.Content)
+		writeSSEChunk(w, id, created, model, ev.Message.Content, "")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, true, err
+	}
+
+	// Terminate the stream cleanly even if Ollama's done event never arrived, so a
+	// streaming client always sees a finish_reason and [DONE] rather than a hang.
+	writeSSEChunk(w, id, created, model, "", "stop")
+	fmt.Fprint(w, "data: [DONE]\n\n")
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	return &Response{
+		ID:      id,
+		Object:  "chat.completion",
+		Created: created,
+		Model:   model,
+		Choices: []Choice{{
+			Index:        0,
+			Message:      Message{Role: "assistant", Content: content.String()},
+			FinishReason: "stop",
+		}},
+		Usage: Usage{
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      promptTokens + completionTokens,
+		},
+	}, true, nil
+}
+
+// writeSSEChunk emits one chat.completion.chunk event. finish is empty for a
+// content delta and "stop" for the terminal frame, which carries an empty delta.
+func writeSSEChunk(w io.Writer, id string, created int64, model, content, finish string) {
+	delta := map[string]string{"content": content}
+	var finishReason interface{}
+	if finish != "" {
+		delta = map[string]string{}
+		finishReason = finish
+	}
+	chunk := map[string]interface{}{
+		"id":      id,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   model,
+		"choices": []map[string]interface{}{{
+			"index":         0,
+			"delta":         delta,
+			"finish_reason": finishReason,
+		}},
+	}
+	b, _ := json.Marshal(chunk)
+	fmt.Fprintf(w, "data: %s\n\n", b)
 }
 
 // maxContext is the hard ceiling on num_ctx, configurable via
@@ -417,6 +568,36 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stream when the client asked for it and the provider supports it: most real
+	// chat clients stream by default and would otherwise render an empty reply.
+	if req.Stream {
+		if sp, ok := provider.(StreamingProvider); ok {
+			inferenceSlots <- struct{}{}
+			res, committed, err := sp.ExecuteStream(req, w)
+			<-inferenceSlots
+
+			te := Telemetry{
+				RequestID:     req.Routing.RequestID,
+				Model:         req.Model,
+				ContextWindow: ctxWindow,
+				Elapsed:       time.Since(t0).Seconds(),
+			}
+			if err != nil {
+				te.Error = err.Error()
+				logTelemetry(te)
+				// Only a failure before the first byte can still become a status code.
+				if !committed {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+				}
+				return
+			}
+			te.PromptTokens = res.Usage.PromptTokens
+			te.CompletionTokens = res.Usage.CompletionTokens
+			logTelemetry(te)
+			return
+		}
+	}
+
 	inferenceSlots <- struct{}{}
 	res, err := provider.Execute(req)
 	<-inferenceSlots
@@ -442,6 +623,9 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 		CompletionTokens: res.Usage.CompletionTokens,
 	})
 
+	// Set this explicitly: without it Go sniffs the JSON body as text/plain, which
+	// strict OpenAI clients reject.
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
 }
 
