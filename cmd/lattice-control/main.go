@@ -474,6 +474,53 @@ func resolveModel(model, target string) string {
 	return c.local
 }
 
+// isCloudModel reports whether a literal model name is one Ollama hosts in the
+// cloud rather than on this machine. Ollama marks those in the tag — `cloud`,
+// or `<size>-cloud`.
+//
+// The marker is the only locality signal a client can carry: an OpenAI-SDK
+// agent names a model and sends no routing envelope, so without reading it a
+// cloud model is routed to the Mac, which does not have it, and 404s.
+//
+// An untagged name is never cloud. Guessing here could send a local model to
+// the cloud, which LOCAL_ONLY forbids; failing loudly at the local target is the
+// safe direction.
+func isCloudModel(model string) bool {
+	i := strings.LastIndex(model, ":")
+	if i < 0 {
+		return false
+	}
+	tag := model[i+1:]
+	return tag == "cloud" || strings.HasSuffix(tag, "-cloud")
+}
+
+// requiredCapability decides whether a request is served locally or in the cloud.
+//
+// Three inputs, in priority order. Privacy is a hard constraint. Model locality
+// comes next, because a cloud-hosted model cannot be served by the Mac at all,
+// so routing it local can only fail at the target. The latency class is last:
+// it is a preference, and the default when nothing else applies is local, which
+// is the machine that is actually ours.
+//
+// A LOCAL_ONLY request naming a cloud model is irreconcilable and is refused —
+// never quietly promoted to cloud, and never quietly rerouted to a target that
+// does not have the model.
+func requiredCapability(privacy, latencyClass, model string) (string, error) {
+	if isCloudModel(model) {
+		if privacy == "LOCAL_ONLY" {
+			return "", fmt.Errorf("LOCAL_ONLY cannot be served by the cloud-only model %q", model)
+		}
+		return "cloud", nil
+	}
+	if privacy == "LOCAL_ONLY" {
+		return "local", nil
+	}
+	if latencyClass == "interactive" {
+		return "cloud", nil
+	}
+	return "local", nil
+}
+
 // handleCapabilities exposes the client-facing namespace — the capability
 // aliases — plus the ceiling the gateway will actually honour. A probing client
 // that finds this stops concluding the API is absent, which is what happened
@@ -522,13 +569,10 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 	healthMutex.RUnlock()
 
 	// 1. Determine Target Capability
-	var requiredCap string
-	if req.Routing.Privacy == "LOCAL_ONLY" {
-		requiredCap = "local"
-	} else if req.Routing.LatencyClass == "interactive" {
-		requiredCap = "cloud"
-	} else {
-		requiredCap = "local"
+	requiredCap, err := requiredCapability(req.Routing.Privacy, req.Routing.LatencyClass, req.Model)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
 	}
 
 	// 2. Routing Logic
