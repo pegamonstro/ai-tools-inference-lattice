@@ -36,7 +36,7 @@ Three planes, each with exactly one job:
    ┌──────────────┐   "what + where"
    │   FRONTEND   │   :8080   single entry point
    └──────┬───────┘
-          │  POST /route  →  {target, endpoint, model_name}
+          │  POST /route  →  {target, endpoint, model_name, locality}
           ▼
    ┌──────────────┐   the brain: capability map, health, policy
    │   CONTROL    │   :8082
