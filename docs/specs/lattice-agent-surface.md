@@ -189,11 +189,7 @@ Manual, on the pair:
 
 ## 7. Reconciliation and recorded drift
 
-- **A parallel shim was reconciled, not adopted** — see the subsection below. An
-  external agent platform had independently begun specifying a translation shim
-  for Lattice, on the premise (established above as false) that Lattice has no
-  chat endpoint. It was allowed to land and was diffed against this spec rather
-  than discarded.
+- **A parallel shim was reconciled, not adopted.** See the subsection below.
 - **Recorded drift:** `LOCAL_PREFERRED` (§4). Spec promises it; the policy table
   does not implement it.
 

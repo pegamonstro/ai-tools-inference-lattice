@@ -105,4 +105,7 @@ The Control plane maintains a counter for active cloud requests.
   - Send an `interactive` request $\rightarrow$ Route to Cloud.
   - Send a `batch` request $\rightarrow$ Route to Mac.
   - Send 4 concurrent `interactive` requests $\rightarrow$ 3 go to Cloud, 1 is queued/spilled.
-  - Mock Mac down $\rightarrow$ Route `LOCAL_PREFERRED` to Cloud.
+  - Mock Mac down $\rightarrow$ Route `LOCAL_PREFERRED` to Cloud. (**plan-ahead:**
+    `LOCAL_PREFERRED` is not implemented — the policy table routes only
+    `LOCAL_ONLY` to the local gateway with no fallback, and everything else by
+    latency class — so this test cannot pass today.)

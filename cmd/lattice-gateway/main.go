@@ -565,7 +565,7 @@ func resolveMaxTokens(req Request) int {
 // ceiling (low=4096, default=8192, high=maxContext), so "high" lets an agent
 // reason over more tokens without forcing every request to pay for them.
 func contextWindow(messages []interface{}, maxTokens int, providerParams map[string]interface{}) int {
-	// Default ceiling is the configured max (32768): large agent prompts must be
+	// Default ceiling is the configured max (65536): large agent prompts must be
 	// allowed to grow, otherwise Ollama truncates them. reasoning_effort=low is
 	// the only knob that deliberately restricts it (for memory-sensitive calls).
 	ceiling := maxContext
