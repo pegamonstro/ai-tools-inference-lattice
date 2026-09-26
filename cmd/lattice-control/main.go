@@ -438,6 +438,27 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(res)
 }
 
+// resolveModel maps the client's model field to the name actually sent to the
+// target.
+//
+// A capability alias is a request for policy to choose the model, so it is
+// resolved per target. Anything else is a literal model name the client chose,
+// and it is passed through verbatim — the previous code looked the name up in
+// the capability map and used the zero value on a miss, so a literal model
+// arrived at the target as an empty string and failed with nothing in telemetry
+// naming what had been asked for. The rule is that model_name is never blank
+// when the client named something.
+func resolveModel(model, target string) string {
+	c, ok := capabilities[model]
+	if !ok {
+		return model
+	}
+	if target == "cloud" {
+		return c.cloud
+	}
+	return c.local
+}
+
 func handleRoute(w http.ResponseWriter, r *http.Request) {
 	t0 := time.Now()
 	bodyBytes, _ := io.ReadAll(r.Body)
@@ -486,7 +507,7 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 		if found {
 			targetID = bestProvider.ID
 			endpoint = bestProvider.Endpoint
-			modelName = capabilities[req.Model].cloud
+			modelName = resolveModel(req.Model, "cloud")
 		}
 	} else {
 		// Find a healthy gateway for 'local' or 'tiny'
@@ -497,7 +518,7 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 					if cap == "local" || (requiredCap == "local" && cap == "tiny") {
 						targetID = id
 						endpoint = gw.Endpoint
-						modelName = capabilities[req.Model].local
+						modelName = resolveModel(req.Model, "local")
 						found = true
 						break
 					}
