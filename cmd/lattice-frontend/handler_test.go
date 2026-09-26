@@ -27,7 +27,7 @@ func TestBuildProxyBodyPreservesClientFields(t *testing.T) {
 	}`)
 	decision := Decision{Target: "mac-gateway", Locality: "local", Endpoint: "http://example:8081", ModelName: "hermes3:8b"}
 
-	out, err := buildProxyBody(raw, decision, "rid-1", map[string]interface{}{"reasoning_effort": "low"})
+	out, err := buildProxyBody(raw, decision, "rid-1", map[string]interface{}{"reasoning_effort": "low"}, true)
 	if err != nil {
 		t.Fatalf("buildProxyBody: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestBuildProxyBodyStripsRoutingOnCloudPath(t *testing.T) {
 	}`)
 	decision := Decision{Target: "ollama-cloud-primary", Locality: "cloud", Endpoint: "http://example:11434", ModelName: "gemma4:31b-cloud"}
 
-	out, err := buildProxyBody(raw, decision, "rid-2", nil)
+	out, err := buildProxyBody(raw, decision, "rid-2", nil, true)
 	if err != nil {
 		t.Fatalf("buildProxyBody: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestBuildProxyBodyStripsRoutingOnCloudPath(t *testing.T) {
 // A body that is not a JSON object cannot be rewritten; the caller must be told
 // rather than sending the target something malformed.
 func TestBuildProxyBodyRejectsNonObject(t *testing.T) {
-	if _, err := buildProxyBody([]byte(`"just a string"`), Decision{ModelName: "x"}, "rid", nil); err == nil {
+	if _, err := buildProxyBody([]byte(`"just a string"`), Decision{ModelName: "x"}, "rid", nil, true); err == nil {
 		t.Error("expected an error for a non-object body")
 	}
 }
@@ -349,7 +349,7 @@ func TestBuildProxyBodyKeysTheEnvelopeOnLocality(t *testing.T) {
 
 	t.Run("a local target is given an envelope whatever it is called", func(t *testing.T) {
 		out, err := buildProxyBody(raw,
-			Decision{Target: "a-second-gateway", Locality: "local", ModelName: "x"}, "rid-local", nil)
+			Decision{Target: "a-second-gateway", Locality: "local", ModelName: "x"}, "rid-local", nil, true)
 		if err != nil {
 			t.Fatalf("buildProxyBody: %v", err)
 		}
@@ -368,7 +368,7 @@ func TestBuildProxyBodyKeysTheEnvelopeOnLocality(t *testing.T) {
 
 	t.Run("the old literal no longer buys an envelope", func(t *testing.T) {
 		out, err := buildProxyBody(raw,
-			Decision{Target: "mac-gateway", Locality: "cloud", ModelName: "x"}, "rid-cloud", nil)
+			Decision{Target: "mac-gateway", Locality: "cloud", ModelName: "x"}, "rid-cloud", nil, true)
 		if err != nil {
 			t.Fatalf("buildProxyBody: %v", err)
 		}
@@ -380,4 +380,94 @@ func TestBuildProxyBodyKeysTheEnvelopeOnLocality(t *testing.T) {
 			t.Errorf("the name alone still injects an envelope: %v", got["routing"])
 		}
 	})
+}
+
+// An embedding is not a chat. The upstream path must be /v1/embeddings, the
+// client's own body must arrive intact, and no routing envelope may be injected —
+// that object is the chat translation layer's contract and an embedding has no
+// such contract. The id rides a header instead, so the gateway's own line is
+// still keyed and the request is correlatable across all three streams.
+func TestHandleEmbeddingsForwardsWithoutARoutingEnvelope(t *testing.T) {
+	var sawPath string
+	var sawBody map[string]interface{}
+	var sawHeader string
+
+	var target *httptest.Server
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(Decision{
+			Target:    "mac-gateway",
+			Locality:  "local",
+			Endpoint:  target.URL,
+			ModelName: "embeddinggemma:latest",
+		})
+	}))
+	defer control.Close()
+
+	target = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawPath = r.URL.Path
+		sawHeader = r.Header.Get("X-Request-Id")
+		json.NewDecoder(r.Body).Decode(&sawBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"object":"list","data":[{"object":"embedding","embedding":[0.1,0.2],"index":0}],"model":"embeddinggemma:latest"}`))
+	}))
+	defer target.Close()
+
+	oldControl, oldTelemetry := controlURL, telemetryPath
+	controlURL = control.URL
+	telemetryPath = t.TempDir() + "/telemetry-frontend.jsonl"
+	defer func() { controlURL, telemetryPath = oldControl, oldTelemetry }()
+
+	body := `{"model":"embeddinggemma:latest","input":"a brief about the routing rule","encoding_format":"float"}`
+	rec := httptest.NewRecorder()
+	handleEmbeddings(rec, httptest.NewRequest("POST", "/v1/embeddings", strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if sawPath != "/v1/embeddings" {
+		t.Errorf("upstream path = %q, want /v1/embeddings", sawPath)
+	}
+	if sawBody["input"] != "a brief about the routing rule" {
+		t.Errorf("input did not arrive intact: %v", sawBody["input"])
+	}
+	if sawBody["encoding_format"] != "float" {
+		t.Errorf("encoding_format was dropped: %v", sawBody)
+	}
+	if _, ok := sawBody["routing"]; ok {
+		t.Errorf("a routing envelope reached the embeddings path: %v", sawBody["routing"])
+	}
+
+	// The id is the frontend's to mint — an embeddings body carries no routing
+	// envelope, and resolveRequestID only ever reads one — so the invariant here is
+	// correlation, not echo: the header the target saw must equal the id this layer
+	// logged, or the gateway's line is unkeyed and the request is correlatable in
+	// two streams out of three.
+	logged, err := os.ReadFile(telemetryPath)
+	if err != nil {
+		t.Fatalf("no frontend telemetry line: %v", err)
+	}
+	var line Telemetry
+	if err := json.Unmarshal(bytes.TrimSpace(logged), &line); err != nil {
+		t.Fatalf("frontend telemetry is not one JSON line: %v (%s)", err, logged)
+	}
+	if line.RequestID == "" {
+		t.Fatal("the frontend logged no request_id")
+	}
+	if sawHeader != line.RequestID {
+		t.Errorf("X-Request-Id = %q, want %q — the gateway's line would be unkeyed",
+			sawHeader, line.RequestID)
+	}
+	if line.Locality != "local" {
+		t.Errorf("frontend locality = %q, want local", line.Locality)
+	}
+}
+
+func TestRouterServesEveryClientFacingRoute(t *testing.T) {
+	mux := newRouter()
+	for _, path := range []string{"/v1/chat/completions", "/v1/embeddings", "/v1/models", "/health"} {
+		if _, pattern := mux.Handler(httptest.NewRequest("POST", path, nil)); pattern != path {
+			t.Errorf("%s is served as %q — an unregistered route is a 404 to the client", path, pattern)
+		}
+	}
 }

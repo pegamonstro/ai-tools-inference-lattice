@@ -41,13 +41,14 @@ type Decision struct {
 }
 
 // buildProxyBody forwards the client's own body with only two rewrites: the
-// resolved model name, and the routing envelope (which belongs to the local
-// translation layer only — a cloud endpoint speaks plain OpenAI and rejects it).
+// resolved model name, and — on a route that has one — the routing envelope
+// (which belongs to the local translation layer only; a cloud endpoint speaks
+// plain OpenAI and rejects it).
 //
 // It deliberately does not enumerate the fields it forwards. Enumerating is what
 // broke this: the previous version rebuilt the body from model, messages and
 // stream, so `tools` was dropped and an agent lost the ability to call anything.
-func buildProxyBody(raw []byte, decision Decision, requestID string, providerParams map[string]interface{}) ([]byte, error) {
+func buildProxyBody(raw []byte, decision Decision, requestID string, providerParams map[string]interface{}, injectRouting bool) ([]byte, error) {
 	var body map[string]interface{}
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return nil, err
@@ -60,9 +61,10 @@ func buildProxyBody(raw []byte, decision Decision, requestID string, providerPar
 
 	// The client's own routing envelope is never forwarded: on the local path it
 	// is replaced by the one the frontend issues, and on the cloud path it must
-	// not appear at all.
+	// not appear at all. injectRouting says whether this route has a routing
+	// contract at all; the locality check says whether this target speaks it.
 	delete(body, "routing")
-	if decision.Locality == "local" {
+	if injectRouting && decision.Locality == "local" {
 		routing := map[string]interface{}{"request_id": requestID}
 		if providerParams != nil {
 			routing["provider_params"] = providerParams
@@ -166,6 +168,19 @@ func resolveRequestID(r Routing) string {
 }
 
 func handleChat(w http.ResponseWriter, r *http.Request) {
+	proxyInference(w, r, "/v1/chat/completions", true)
+}
+
+// handleEmbeddings shares the chat flow — parse, ask control, proxy — and differs
+// in exactly two ways: the upstream path, and the absence of a routing envelope.
+// Embeddings are local-only by platform, because Ollama refuses them on its cloud
+// passthrough, so control's existing resolution of an untagged embedding model to
+// the local capability is already the whole routing story.
+func handleEmbeddings(w http.ResponseWriter, r *http.Request) {
+	proxyInference(w, r, "/v1/embeddings", false)
+}
+
+func proxyInference(w http.ResponseWriter, r *http.Request, upstreamPath string, injectRouting bool) {
 	tTotalStart := time.Now()
 
 	var req Request
@@ -246,7 +261,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	tele.Model = decision.ModelName
 
 	// 2. Rewrite request for Target
-	finalBodyBytes, err := buildProxyBody(bodyBytes, decision, req.Routing.RequestID, req.Routing.ProviderParams)
+	finalBodyBytes, err := buildProxyBody(bodyBytes, decision, req.Routing.RequestID, req.Routing.ProviderParams, injectRouting)
 	if err != nil {
 		tele.Error = err.Error()
 		http.Error(w, "Malformed request body", http.StatusBadRequest)
@@ -258,20 +273,34 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	targetURL, _ := url.Parse(decision.Endpoint)
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
-	r.URL.Path = "/v1/chat/completions"
+	r.URL.Path = upstreamPath
 	r.Body = io.NopCloser(bytes.NewBuffer(finalBodyBytes))
 	r.ContentLength = int64(len(finalBodyBytes))
+
+	// Sent on both routes. Chat carries its id in the envelope; embeddings has no
+	// envelope, so without this header its gateway line would be unkeyed and the
+	// request would be correlatable in two planes out of three.
+	r.Header.Set("X-Request-Id", req.Routing.RequestID)
 
 	w.Header().Set("X-Request-Id", req.Routing.RequestID)
 
 	proxy.ServeHTTP(w, r)
 }
 
+// newRouter holds the route table so it can be asserted in a test: a route that
+// exists in the source but is never registered is, from a client's side,
+// indistinguishable from one that does not exist.
+func newRouter() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", handleChat)
+	mux.HandleFunc("/v1/embeddings", handleEmbeddings)
+	mux.HandleFunc("/v1/models", handleModels)
+	mux.HandleFunc("/health", handleHealth)
+	return mux
+}
+
 func main() {
-	http.HandleFunc("/v1/chat/completions", handleChat)
-	http.HandleFunc("/v1/models", handleModels)
-	http.HandleFunc("/health", handleHealth)
 	addr := latticeconfig.Env("LATTICE_FRONTEND_ADDR", ":8080")
 	fmt.Printf("Lattice Frontend listening on %s...\n", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	log.Fatal(http.ListenAndServe(addr, newRouter()))
 }
