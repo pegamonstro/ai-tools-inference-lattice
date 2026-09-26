@@ -138,9 +138,58 @@ func monitorHealth() {
 				gatewayHealthy[id] = true
 				healthMutex.Unlock()
 			}
+			pullGatewayTelemetry(gw)
 		}
 		time.Sleep(10 * time.Second)
 	}
+}
+
+// gatewayTelemetrySeq is the cursor into the gateway's buffered event stream;
+// events with a higher seq are new and get appended to the local relay file.
+var gatewayTelemetrySeq int64
+
+// Relaying the gateway's runtime telemetry: the gateway lives on the Mac with
+// no shared filesystem, so we pull its buffered events over HTTP and append
+// them to a local JSONL — the same stream the Bee feeder tails for the
+// control/frontend events. The control plane is a transport here, not a
+// formatter: it never emits to the Bee socket itself.
+func pullGatewayTelemetry(gw Gateway) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("%s/telemetry?since=%d", gw.Endpoint, gatewayTelemetrySeq))
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+
+	var payload struct {
+		Seq    int64             `json:"seq"`
+		Events []json.RawMessage `json:"events"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return
+	}
+
+	// The first pull only seeds the cursor: everything already buffered predates
+	// this process, so replaying it would duplicate lines already on screen.
+	if gatewayTelemetrySeq == 0 {
+		gatewayTelemetrySeq = payload.Seq
+		return
+	}
+
+	path := latticeconfig.Env("LATTICE_GATEWAY_TELEMETRY_LOCAL", "/var/log/lattice/telemetry-gateway.jsonl")
+	for _, ev := range payload.Events {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			fmt.Printf("Gateway telemetry relay error: %v\n", err)
+			return
+		}
+		f.Write(append(ev, '\n'))
+		f.Close()
+	}
+	gatewayTelemetrySeq = payload.Seq
 }
 
 func dispatcher() {

@@ -45,7 +45,8 @@ type Telemetry struct {
 var controlURL = latticeconfig.Env("LATTICE_CONTROL_URL", "http://127.0.0.1:8082/route")
 
 func logTelemetry(t Telemetry) {
-	f, err := os.OpenFile("telemetry-frontend.jsonl", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	path := latticeconfig.Env("LATTICE_FRONTEND_TELEMETRY", "/var/log/lattice/telemetry-frontend.jsonl")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Printf("Telemetry error: %v\n", err)
 		return
@@ -97,13 +98,18 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	proxyBody["model"] = decision.ModelName
 	proxyBody["messages"] = req.Messages
 
-	// Forward provider_params to the local gateway (the translation layer).
-	// Cloud targets speak plain OpenAI and reject the routing envelope, so
-	// provider_params are only forwarded on the local path.
-	if req.Routing.ProviderParams != nil && decision.Target == "mac-gateway" {
-		proxyBody["routing"] = map[string]interface{}{
-			"provider_params": req.Routing.ProviderParams,
+	// Forward request_id + provider_params to the local gateway (the translation
+	// layer). Cloud targets speak plain OpenAI and reject the routing envelope,
+	// so these are only forwarded on the local path. request_id lets the gateway
+	// correlate its telemetry with the control/frontend events.
+	if decision.Target == "mac-gateway" {
+		routing := map[string]interface{}{
+			"request_id": req.Routing.RequestID,
 		}
+		if req.Routing.ProviderParams != nil {
+			routing["provider_params"] = req.Routing.ProviderParams
+		}
+		proxyBody["routing"] = routing
 	}
 	finalBodyBytes, _ := json.Marshal(proxyBody)
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=Lattice per-event feeder for the Bee terminal log screen
+After=bee-term.service
+
+[Service]
+Type=simple
+# %h expands to the feeder account's home; the script and bee-feed-lib.sh live
+# under it. Install bee-feed-lattice.sh into %h/work/bee-feeders/bin/.
+ExecStart=%h/work/bee-feeders/bin/bee-feed-lattice.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

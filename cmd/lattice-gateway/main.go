@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -55,6 +56,79 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+}
+
+// Telemetry is one JSONL line per inference request, written to disk for the
+// Bee-terminal feeder to tail and relay to the log screen.
+type Telemetry struct {
+	RequestID        string  `json:"request_id"`
+	Model            string  `json:"model"`
+	ContextWindow    int     `json:"context_window"`
+	Elapsed          float64 `json:"elapsed_s"`
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	Error            string  `json:"error,omitempty"`
+}
+
+// TelemetryEvent tags a buffered event with a monotonic sequence so a remote
+// consumer can pull only what it has not seen yet.
+type TelemetryEvent struct {
+	Seq int64 `json:"seq"`
+	Telemetry
+}
+
+// The gateway runs on the Mac, which shares no filesystem with the RPi4 control
+// plane, so recent events are also buffered in memory and served over HTTP at
+// /telemetry. The control plane pulls them into the local telemetry stream that
+// the Bee feeder tails.
+const telemetryRingCap = 256
+
+var (
+	telemetryRing  []TelemetryEvent
+	telemetrySeq   int64
+	telemetryMutex sync.Mutex
+)
+
+func logTelemetry(t Telemetry) {
+	telemetryMutex.Lock()
+	telemetrySeq++
+	telemetryRing = append(telemetryRing, TelemetryEvent{Seq: telemetrySeq, Telemetry: t})
+	if len(telemetryRing) > telemetryRingCap {
+		telemetryRing = telemetryRing[len(telemetryRing)-telemetryRingCap:]
+	}
+	telemetryMutex.Unlock()
+
+	path := latticeconfig.Env("LATTICE_GATEWAY_TELEMETRY", "telemetry-gateway.jsonl")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Printf("Telemetry error: %v\n", err)
+		return
+	}
+	defer f.Close()
+	b, _ := json.Marshal(t)
+	f.Write(append(b, '\n'))
+}
+
+// handleTelemetry serves buffered events with seq greater than ?since, so a
+// polling consumer advances a cursor rather than re-reading the whole buffer.
+func handleTelemetry(w http.ResponseWriter, r *http.Request) {
+	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+
+	telemetryMutex.Lock()
+	seq := telemetrySeq
+	events := make([]TelemetryEvent, 0, len(telemetryRing))
+	for _, e := range telemetryRing {
+		if e.Seq > since {
+			events = append(events, e)
+		}
+	}
+	telemetryMutex.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"seq":    seq,
+		"events": events,
+	})
 }
 
 // --- Dynamic Memory Budgeter ---
@@ -140,11 +214,7 @@ func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 	// returns the same message content, which we map back to OpenAI shape below.
 	targetURL, _ := url.Parse(p.Endpoint + "/api/chat")
 
-	// max_budget caps output length (default 4096).
-	maxTokens := 4096
-	if mb, ok := req.Routing.ProviderParams["max_budget"].(float64); ok {
-		maxTokens = int(mb)
-	}
+	maxTokens := resolveMaxTokens(req)
 
 	// Context window is sized dynamically to the prompt: short prompts keep a
 	// small KV cache (low memory), while large agent prompts grow it. reasoning_effort
@@ -234,6 +304,16 @@ func kvCacheTypeFromEnv() string {
 	return "q8_0"
 }
 
+// resolveMaxTokens caps output length via the max_budget provider param
+// (default 4096). Shared by Execute and the telemetry path so both agree.
+func resolveMaxTokens(req Request) int {
+	maxTokens := 4096
+	if mb, ok := req.Routing.ProviderParams["max_budget"].(float64); ok {
+		maxTokens = int(mb)
+	}
+	return maxTokens
+}
+
 // contextWindow sizes the Ollama context to the prompt: it starts at 2048 and
 // doubles until it fits the prompt + output + margin. reasoning_effort sets the
 // ceiling (low=4096, default=8192, high=maxContext), so "high" lets an agent
@@ -308,11 +388,22 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	t0 := time.Now()
+	maxTokens := resolveMaxTokens(req)
+	ctxWindow := contextWindow(req.Messages, maxTokens, req.Routing.ProviderParams)
+
 	fmt.Printf("Gateway executing request [%s] for model %s\n", req.Routing.RequestID, req.Model)
 
 	// Dynamic Memory Check
 	if !budgeter.CanAccommodate() {
 		fmt.Println("  Memory pressure: available RAM below safety margin. Rejecting to avoid swap.")
+		logTelemetry(Telemetry{
+			RequestID:     req.Routing.RequestID,
+			Model:         req.Model,
+			ContextWindow: ctxWindow,
+			Elapsed:       time.Since(t0).Seconds(),
+			Error:         "memory_pressure",
+		})
 		http.Error(w, "Local memory pressure: available RAM below safety margin", http.StatusTooManyRequests)
 		return
 	}
@@ -331,9 +422,25 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 	<-inferenceSlots
 
 	if err != nil {
+		logTelemetry(Telemetry{
+			RequestID:     req.Routing.RequestID,
+			Model:         req.Model,
+			ContextWindow: ctxWindow,
+			Elapsed:       time.Since(t0).Seconds(),
+			Error:         err.Error(),
+		})
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	logTelemetry(Telemetry{
+		RequestID:        req.Routing.RequestID,
+		Model:            req.Model,
+		ContextWindow:    ctxWindow,
+		Elapsed:          time.Since(t0).Seconds(),
+		PromptTokens:     res.Usage.PromptTokens,
+		CompletionTokens: res.Usage.CompletionTokens,
+	})
 
 	json.NewEncoder(w).Encode(res)
 }
@@ -364,6 +471,7 @@ func main() {
 
 	http.HandleFunc("/v1/chat/completions", handleInference)
 	http.HandleFunc("/health", handleHealth)
+	http.HandleFunc("/telemetry", handleTelemetry)
 	addr := latticeconfig.Env("LATTICE_GATEWAY_ADDR", ":8081")
 	fmt.Printf("Lattice Gateway listening on %s (Dynamic Memory Budgeting active)\n", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
