@@ -26,7 +26,7 @@ the error shapes you can expect.
 
 ### [Operations Manual](manual/operations-manual.md)
 Operator-facing. Cross-compilation, the full environment-variable reference,
-running by hand, systemd user units, deploying a new binary and rolling back,
+running by hand, process supervision, deploying a new binary and rolling back,
 the telemetry/Bee pipeline, Mac memory safety, and a troubleshooting table.
 
 ### [Architecture Handbook](handbook/architecture-handbook.md)

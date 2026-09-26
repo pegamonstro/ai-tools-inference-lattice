@@ -60,7 +60,7 @@ GOOS=linux GOARCH=arm64 go build -o bin/lattice-cli      ./cmd/lattice-cli
 ## 3. Environment variables
 
 Every address and tunable is environment-driven so no hostname appears in the
-source. Defaults are shown; override in the unit files (see §5).
+source. Defaults are shown; override in each process's environment (see §5).
 
 ### Control plane (RPi4)
 
@@ -98,7 +98,7 @@ source. Defaults are shown; override in the unit files (see §5).
 
 ## 4. Run it by hand
 
-Useful before wiring units, and for debugging.
+Useful for debugging, and for seeing exactly what each process needs to run.
 
 ```bash
 # On the Mac
@@ -123,35 +123,46 @@ before `local` requests route again.
 
 ---
 
-## 5. systemd units (RPi4)
+## 5. Process supervision
 
-The control plane and frontend run as **user units**. They are managed from
-your own session with:
+> **Current state, verified 2026-09-26: nothing supervises the servers.**
+> `lattice-control`, `lattice-frontend`, and the Mac's `lattice-gateway` are all
+> plain long-running processes, started by hand. They are **not** systemd units
+> on either host — there is no system unit and no user unit for them. They
+> survive a shell exit (they reparent to `systemd --user`) but **they will not
+> restart after a crash or a reboot.**
+
+Only one service is managed: the Bee feeder, as a user unit on the Pi.
 
 ```bash
-sudo systemctl --user --machine=<user>@.host status  lattice-control
-sudo systemctl --user --machine=<user>@.host restart lattice-control
-sudo systemctl --user --machine=<user>@.host status  lattice-frontend
-sudo systemctl --user --machine=<user>@.host restart lattice-frontend
+systemctl --user status  bee-feed-lattice.service
+systemctl --user restart bee-feed-lattice.service
 ```
 
-`journalctl` for user units is **not persisted** on this host. To debug a unit,
-run its binary in the foreground and capture stderr yourself.
+`journalctl` for user units is **not persisted** on this host. To debug the
+feeder, run it in the foreground and capture stderr yourself.
 
-The Mac gateway is currently started manually (no unit). It is a plain
-long-running process; treat "is the gateway up?" as the first question in any
-local-inference incident.
+Because the servers are unsupervised, "is the process still running?" is the
+first question in any incident — and restarting a host brings the lattice down
+until someone starts the binaries again. Adding units for the three servers
+(and a launch agent on the Mac) is the obvious next hardening step.
 
 ### Deploying a new binary
 
-Overwriting a *running* binary fails with `Text file busy`. Stop the unit first:
+Overwriting a *running* binary fails with `Text file busy`. Kill the process
+first, then copy, then start the new binary:
 
 ```bash
-sudo systemctl --user --machine=<user>@.host stop lattice-frontend
+pkill -x lattice-frontend          # or kill the exact PID — see the warning below
 cp bin/lattice-frontend ~/bin/lattice-frontend.new
 mv ~/bin/lattice-frontend.new ~/bin/lattice-frontend
-sudo systemctl --user --machine=<user>@.host start lattice-frontend
+~/bin/lattice-frontend &           # relaunch (see §4 for required env)
 ```
+
+> **Kill by PID, not by pattern.** `pkill -f "<name>"` matches the *full command
+> line*, including your own SSH session if its command text contains the name —
+> which kills your session mid-deploy. `pkill -x` matches the process name
+> exactly and is safe; when in doubt, read the PID from `ps` and `kill` it.
 
 Rollback is the same procedure with the previous binary — keep a copy before
 deploying.
@@ -242,7 +253,7 @@ vm_stat | grep -i swap          # Swapouts is the wear-relevant counter
 | `503 No healthy local gateway found` | gateway down, or the Pi's 10s health loop hasn't re-probed it yet | start the gateway; wait ~10s; check `/status` |
 | `429 Memory pressure` | free RAM below the margin | close memory hogs on the Mac, or lower the context window |
 | `500 ollama returned status 404` | model id not pulled / not present in Ollama | `ollama pull <model>`, verify the capability map |
-| `Text file busy` on deploy | binary is running | stop the unit, then copy |
+| `Text file busy` on deploy | the binary is running | kill the process (by PID), then copy — see §5 |
 | Frontend returns empty reply to a streaming client | a rebuild dropped the `stream` field somewhere on the proxy path | verify the field survives frontend → gateway |
 | Cloud request returns empty model | client sent a real model name instead of a capability alias | use `local-brain` / `local-coder` |
 | Nothing on the Bee screen | feeder not running, or relay file not yet created | run the feeder in the foreground with `2>/tmp/feeder.log`; remember journald isn't persisted here |
@@ -257,6 +268,8 @@ its output buffers and the pipeline stalls.
 
 ## 9. Maintenance checklist
 
+- [ ] all three server processes are running (`lattice-control`, `lattice-frontend`
+      on the Pi, `lattice-gateway` on the Mac) — nothing restarts them for you
 - [ ] `/status` reports the gateway healthy
 - [ ] feeder unit active; all three telemetry files exist and are growing
 - [ ] `bin/` on both hosts matches the current commit

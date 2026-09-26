@@ -253,8 +253,9 @@ These have each cost real debugging time.
 - **The health loop is on a 10-second timer.** A just-restarted gateway is
   reported unhealthy until the next probe. Tests that fire immediately after a
   restart will see spurious 503s.
-- **journald is not persisted** for user units on the Pi. Debug by running the
-  binary in the foreground.
+- **journald is not persisted** for user units on the Pi. Debug the feeder by
+  running it in the foreground; the servers write no logs you can query after
+  the fact.
 - **`pkill -f` can kill your own SSH session** when its command line contains
   the pattern. Kill by PID.
 
