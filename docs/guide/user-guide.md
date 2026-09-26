@@ -84,7 +84,7 @@ it is how you express *where* the work is allowed to go.
 
 | field | values | meaning |
 |---|---|---|
-| `privacy` | `LOCAL_ONLY` \| `LOCAL_PREFERRED` \| `CLOUD_ALLOWED` | `LOCAL_ONLY` is a hard gate: if no local gateway is available the request **fails with 503**. It will never silently reach the cloud. |
+| `privacy` | `LOCAL_ONLY` \| `LOCAL_PREFERRED` \| `CLOUD_ALLOWED` | `LOCAL_ONLY` is a hard gate: if no local gateway is available the request **fails with 503**. It will never silently reach the cloud. `LOCAL_PREFERRED` was documented as "prefer Mac, fall back to cloud", but the control plane does **not** route by it — a request carrying it is routed by its latency class, like any non-`LOCAL_ONLY` level. |
 | `latency_class` | `interactive` \| `batch` | `interactive` prefers the cloud (fast, budgeted); `batch` prefers the local gateway (free, slow). |
 | `parallelism` | int | advisory concurrency hint. |
 | `request_id` | string | your correlation id. It is echoed through all three telemetry streams — use it to trace a request. |
