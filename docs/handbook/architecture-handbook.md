@@ -290,6 +290,12 @@ These have each cost real debugging time.
   matches nothing (the name is 16 chars) and prints a warning you may not read,
   so a "kill by name" loop quietly skips it. `lattice-gateway` (15) is fine;
   `lattice-frontend` is not. This is a procps limit, not a Lattice one.
+- **`systemctl --user` addresses a user manager, not a host.** Run from an
+  account that does not own the units, it reports `inactive` for services that
+  are demonstrably running — a false negative about the *wrong* manager. Only
+  `--machine=<owner>@.host` reaches the right one. Both this and the `pgrep` limit
+  share a shape worth internalising: the tool answers confidently about something
+  other than what you asked, so the *verification* is what lies, not the service.
 
 ---
 

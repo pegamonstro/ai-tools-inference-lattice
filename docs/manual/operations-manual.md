@@ -150,12 +150,20 @@ systemctl --user status  lattice-control.service
 systemctl --user restart lattice-frontend.service
 ```
 
-From another account on the same host, `--machine` targets the owner's user
-manager:
+`--user` addresses **a user manager, not the host** — it acts on the units of
+whoever is running the command. So from any account other than the service
+owner, `--machine` is required; without it the query is answered about the
+*wrong manager* and reports `inactive` for a service that is running fine.
 
 ```bash
 sudo systemctl --user --machine=<lattice-account>@.host restart lattice-control.service
 ```
+
+> **Check `whoami` before believing an `inactive`.** A bare `systemctl --user
+> is-active` from a different login account is a *false negative*: it describes
+> that account's empty manager while the service is healthy. Confirm the
+> account first — this has already sent one debugging session chasing a service
+> that was never down.
 
 ### Managing the Mac gateway
 
@@ -320,9 +328,9 @@ its output buffers and the pipeline stalls.
 
 ## 9. Maintenance checklist
 
-- [ ] all three services active (`systemctl --user is-active lattice-control
-      lattice-frontend` on the Pi; `launchctl print gui/$UID/com.lattice.gateway`
-      on the Mac)
+- [ ] all three services active (`sudo systemctl --user --machine=<lattice-account>@.host
+      is-active lattice-control lattice-frontend` on the Pi;
+      `launchctl print gui/$UID/com.lattice.gateway` on the Mac)
 - [ ] `/status` reports the gateway healthy
 - [ ] feeder unit active; all three telemetry files exist and are growing
 - [ ] `bin/` on both hosts matches the current commit
