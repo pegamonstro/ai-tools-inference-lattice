@@ -197,8 +197,9 @@ $ lattice-cli "Summarise the last paragraph."
 ### Embeddings
 
 `POST /v1/embeddings` is supported. The body is forwarded as you send it — `model`
-is rewritten to the resolved name, and nothing else is touched — which is why
-`input`, `encoding_format`, and any field Lattice does not know about survive.
+is rewritten to the resolved name, and nothing else is rewritten (a `routing`
+envelope is dropped, not forwarded) — which is why `input`, `encoding_format`,
+and any field Lattice does not know about survive.
 
 ```bash
 curl -s http://<frontend-host>:8080/v1/embeddings \
@@ -275,9 +276,11 @@ set it, and neither does an error returned before the request is proxied — a
 malformed body, or a control-plane failure.) If you set `routing.request_id`,
 that id is echoed back; if you send none, Lattice generates one and returns it
 there, so an id is always available for a proxied request even when your client
-has never heard of the `routing` envelope. An embeddings request carries no
-`routing` envelope, so its id is generated rather than echoed back. Read the
-header if you did not supply an id and want to find the request in the logs.
+has never heard of the `routing` envelope. An embeddings request is forwarded
+without the `routing` envelope, but if you set `routing.request_id` it is still
+echoed back — the id is taken from your body before the envelope is stripped.
+Read the header if you did not supply an id and want to find the request in the
+logs.
 
 That id is attached to the control-plane decision, the frontend completion, and
 the gateway execution, so you can follow one request across all three planes in
