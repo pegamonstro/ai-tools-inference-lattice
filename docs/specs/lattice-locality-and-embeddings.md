@@ -1,7 +1,7 @@
 # Spec: Reported locality and the local embeddings route
 
 **Status:** Draft
-**Scope:** `lattice-control`, `lattice-frontend`, `lattice-gateway`, `lattice-stats`
+**Scope:** `lattice-control`, `lattice-frontend`, `lattice-gateway`
 **Depends on:** [lattice-observability.md](lattice-observability.md),
 [lattice-agent-surface.md](lattice-agent-surface.md),
 [lattice-gateway.md](lattice-gateway.md), [inference-v1.md](inference-v1.md)
@@ -31,8 +31,10 @@ reaches a client.
 - **The orchestrator needs memory.** Its units are dispatched as separate
   processes with no shared conversation; recall is the only continuity it has.
   Recall rides on embeddings, and embeddings currently return `404`.
-- **Every new consumer pays the name-matching tax again.** The defect is not
-  confined to the stats tool; the frontend already carries it (§2).
+- **Every new consumer pays the name-matching tax again.** The frontend already
+  carries it (§2), and a stats rewrite would need a second copy of it. The
+  registry the rule comes from lives in control, so no other layer can derive
+  the answer without either reaching for that registry or hardcoding the names.
 
 ## 2. What is true today (verified against the code, 2026-09-26)
 
@@ -83,7 +85,7 @@ deployment tier (development/production), not where a request was executed.
 | control | `telemetry-control.jsonl` | + `locality` |
 | frontend | `telemetry-frontend.jsonl` | + `locality`, taken from the decision |
 | gateway | `telemetry-gateway.jsonl` | + `locality: "local"` (constant) |
-| `lattice-stats` | — | reads `locality` for §2's split |
+| `lattice-stats` *(not in this plan)* | — | once rewritten, reads `locality` for §2's split |
 
 The gateway's entry is constant because the gateway **is** the local executor.
 It has no `target` field today and does not gain one: its provenance is the
@@ -136,7 +138,6 @@ an enumeration dangerous in the first place.
 | literal | replaced by |
 |---|---|
 | `decision.Target == "mac-gateway"` in the frontend | `decision.Locality == "local"` |
-| the name pair in `lattice-stats` | `locality` |
 
 ## 4. The local embeddings route
 
