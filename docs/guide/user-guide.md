@@ -194,6 +194,33 @@ The bundled CLI is a thin wrapper for quick local checks:
 $ lattice-cli "Summarise the last paragraph."
 ```
 
+### Embeddings
+
+`POST /v1/embeddings` is supported. The body is forwarded as you send it — `model`
+is rewritten to the resolved name, and nothing else is touched — which is why
+`input`, `encoding_format`, and any field Lattice does not know about survive.
+
+```bash
+curl -s http://<frontend-host>:8080/v1/embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"embeddinggemma:latest","input":"the routing rule"}'
+```
+
+Four limits are worth knowing, because they are Ollama's and Lattice relays them
+rather than smoothing them over:
+
+- **Embeddings are local-only.** Ollama refuses them on its cloud passthrough, and
+  no `-cloud` embedding tag exists. The embedding model runs on the Mac.
+- **`input` as a token array returns `400`.** Send text; Ollama diverges from
+  OpenAI here.
+- **An empty `encoding_format` (`""`) is rejected.** Omit the key rather than
+  sending an empty one — the body is forwarded, not sanitised.
+- **base64 embeddings are raw float32, little-endian**, standard encoding.
+
+An embedding shares the gateway's single inference slot with chat, so an embed
+issued during a long turn waits for it. That is deliberate: with one model
+resident, a concurrent embed would evict the chat model.
+
 ---
 
 ## 6. What to expect from each path
@@ -241,15 +268,16 @@ rather than disappearing.
 
 ## 8. Tracing a request
 
-Every `/v1/chat/completions` response the frontend proxies to a target carries an
-**`X-Request-Id`** header, including a failure response from that target. (The
-discovery endpoints `GET /v1/models` and `GET /health` do not set it, and neither
-does an error returned before the request is proxied — a malformed body, or a
-control-plane failure.) If you set `routing.request_id`, that id is echoed back;
-if you send none, Lattice generates one and returns it there, so an id is always
-available for a proxied request even when your client has never heard of the
-`routing` envelope. Read the header if you did not supply an id and want to find
-the request in the logs.
+Every `/v1/chat/completions` or `/v1/embeddings` response the frontend proxies to
+a target carries an **`X-Request-Id`** header, including a failure response from
+that target. (The discovery endpoints `GET /v1/models` and `GET /health` do not
+set it, and neither does an error returned before the request is proxied — a
+malformed body, or a control-plane failure.) If you set `routing.request_id`,
+that id is echoed back; if you send none, Lattice generates one and returns it
+there, so an id is always available for a proxied request even when your client
+has never heard of the `routing` envelope. An embeddings request carries no
+`routing` envelope, so its id is generated rather than echoed back. Read the
+header if you did not supply an id and want to find the request in the logs.
 
 That id is attached to the control-plane decision, the frontend completion, and
 the gateway execution, so you can follow one request across all three planes in

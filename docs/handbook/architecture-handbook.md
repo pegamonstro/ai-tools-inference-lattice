@@ -98,19 +98,29 @@ entry; adding a model behind it is an operator concern.
    The frontend parses the body and does not inspect the messages.
 2. **Frontend → control.** The frontend posts the whole request to `/route`
    (5-second timeout). The control plane holds the capability map and the
-   gateway health state; it returns `{target, endpoint, model_name}` — or an
-   error status, which the frontend **propagates verbatim** rather than masking
-   as a 500.
-3. **Frontend rebuilds the body.** A fresh `proxyBody` is constructed with the
-   resolved model name, the messages, and `stream`. For the local path only,
-   the `routing` envelope (`request_id` + `provider_params`) is forwarded —
-   cloud endpoints speak plain OpenAI and would reject it.
+   gateway health state; it returns `{target, endpoint, model_name, locality}`
+   — or an error status, which the frontend **propagates verbatim** rather than
+   masking as a 500.
+3. **Frontend forwards the body with only the model name rewritten.** Nothing is
+   rebuilt: the client's own body passes through, and only the resolved model
+   name is changed, which is what keeps fields such as `tools` intact. The
+   `routing` envelope (`request_id` + `provider_params`) is injected only on a
+   route that carries that contract — the chat path — and only when the resolved
+   target's `locality` is `local`; cloud endpoints speak plain OpenAI and would
+   reject it.
 4. **Frontend → target.** A `httputil.ReverseProxy` forwards to the decided
    endpoint. For streaming requests the proxy flushes SSE frames as they arrive.
 5. **Gateway → Ollama.** On the local path the gateway translates the OpenAI
    body into Ollama's options (`num_ctx`, `num_predict`, `kv_cache_type`),
    acquires the single inference slot, and calls Ollama.
 6. **Telemetry.** Each plane appends one JSONL event, all sharing `request_id`.
+
+An embeddings request takes the same path as a chat request — frontend parses,
+control decides, the target executes — and differs in two ways: the upstream path
+is `/v1/embeddings` rather than `/v1/chat/completions`, and no routing envelope is
+attached, because that object is the chat translation layer's contract. Its
+correlation id travels in an `X-Request-Id` header instead, so the request is
+still keyed across all three telemetry streams.
 
 ---
 
@@ -161,6 +171,18 @@ Design rules:
   the stream — a refusal carries no target, so the reverse order would show a
   denial as a successful route. A layer that never ran is the only legitimate
   absence.
+
+**`locality` is reported, never derived.** Every routing decision and every
+telemetry line carries `locality` — `local`, `cloud`, or `unknown` — taken from
+the registry the target was chosen from, not from the target's name. The values
+are the same strings the registry entries use in `Capabilities`, so there is one
+vocabulary and no translation table to drift. Consumers must treat the set as
+open: funnel an unrecognised value into `unknown` rather than dropping the event,
+and always retain `target`, which is never dropped.
+
+This exists because the alternative — each tool matching the two literal target
+names — puts the registry's knowledge in every consumer that needs it. Adding a
+value to the enum is non-breaking; changing or removing one is not.
 
 **Crossing the host boundary.** The Mac and the Pi share no filesystem, so
 gateway telemetry is *pulled*: the gateway buffers its last 256 events and
