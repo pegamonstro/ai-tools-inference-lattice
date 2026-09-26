@@ -122,9 +122,16 @@ Raise it on slower or more loaded hardware; lower it on a faster host. The value
 is a Go duration string (`90s`, `30m`, `1h`); an unparseable or non-positive value
 falls back to the default.
 
+**The two readings were verified live**, which is worth knowing before trusting
+the streaming bound: on a streamed request the first byte arrived at 0.2 s while
+the answer ran on to 1.5 s, whereas on a unary request the two times were equal
+to within 40 µs. That is the asymmetry above, measured — the streaming bound
+fires on a stalled server but never cuts a long answer short.
+
 > A client that disconnects releases its in-flight inference — and its place in
 > the queue — so a long bound no longer risks pinning the gateway's single
-> inference slot.
+> inference slot. A client that goes away *while queued for the slot* is recorded
+> in gateway telemetry as `client_cancelled_while_queued`.
 
 > **Note.** The control plane's telemetry sink is the one hard-coded path
 > (`/var/log/lattice/telemetry-control.jsonl`); it is not environment-driven.
@@ -369,6 +376,7 @@ vm_stat | grep -i swap          # Swapouts is the wear-relevant counter
 |---|---|---|
 | `503 No healthy local gateway found` | gateway down, or the Pi's 10s health loop hasn't re-probed it yet | the unit restarts it; wait ~10s; check `/status` |
 | `429 Memory pressure` | free RAM below the margin | close memory hogs on the Mac, or lower the context window |
+| `500 context deadline exceeded` on a local request | the Ollama bound elapsed before the answer finished — a genuinely slow request (large prompt, or many output tokens), not a hang | raise `LATTICE_GATEWAY_OLLAMA_TIMEOUT` (see §3.1); compare the prompt size against the `32768` ceiling |
 | `500 ollama returned status 404` | model id not pulled / not present in Ollama | `ollama pull <model>`, verify the capability map |
 | `Text file busy` on deploy | the binary is running | stop the service, copy, start — see §5 |
 | Frontend returns empty reply to a streaming client | the target streamed no content — e.g. a tool-calling request, which is unary-only — or the client did not send `stream: true` | confirm the client sent `stream: true`; the frontend now forwards the body untouched, so a dropped `stream` field is no longer a plausible cause |
