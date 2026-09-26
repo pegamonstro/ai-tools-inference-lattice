@@ -91,15 +91,28 @@ it is how you express *where* the work is allowed to go.
 | `provider_params.reasoning_effort` | `low` \| `medium` \| `high` | raises the output ceiling and the context window for reasoning models. |
 | `provider_params.max_budget` | int | caps output tokens (default 4096). |
 
-**Omit `routing` entirely** and you get the safe default: the local path.
+**Omit `routing` entirely** and you get the safe default: the local path. The one
+thing that overrides it is the model's own name — a cloud-tagged model cannot be
+served by the Mac, so it goes to the cloud regardless.
 
 ### Decision table
 
-| privacy | latency_class | target |
-|---|---|---|
-| `LOCAL_ONLY` | any | local gateway, or **503** if unhealthy — never cloud |
-| anything else | `interactive` | cloud |
-| anything else | `batch` | local gateway |
+Read top to bottom: the first row that matches is the decision.
+
+| model | privacy | latency_class | target |
+|---|---|---|---|
+| cloud-tagged | `LOCAL_ONLY` | any | **409** — refused. Not promoted to cloud (privacy), not sent to a Mac that does not have it (an anonymous failure) |
+| cloud-tagged | anything else | any | cloud |
+| any | `LOCAL_ONLY` | any | local gateway, or **503** if unhealthy — never cloud |
+| any | anything else | `interactive` | cloud |
+| any | anything else | `batch` or absent | local gateway |
+
+**How a model is known to be cloud-hosted:** Ollama marks it in the tag — the
+part after the last `:` is `cloud`, or `<size>-cloud` (e.g. `minimax-m3:cloud`,
+`nemotron-3-nano:30b-cloud`). That marker is the only locality signal available,
+so use the exact tag Ollama publishes: a name with no tag is treated as local,
+and a cloud model named without its tag will fail at the Mac with a `404` rather
+than being routed to the cloud.
 
 ---
 
@@ -202,14 +215,25 @@ gateway is healthy.
 
 | status | body | meaning |
 |---|---|---|
+| `409` | `Control plane: LOCAL_ONLY cannot be served by the cloud-only model "…"` | The request asked for `LOCAL_ONLY` *and* named a cloud-hosted model. Refused, because neither target can satisfy both: the cloud violates the privacy level, and the Mac does not have the model. Drop `LOCAL_ONLY`, or name a model the Mac actually has. |
 | `503` | `Control plane: No healthy local gateway found` | A `LOCAL_ONLY` (or default) request had no healthy local gateway. **This is the sovereignty guarantee working** — it did not fall back to cloud. Retry when the gateway recovers. |
 | `503` | `Control plane unavailable or timed out` | The frontend could not reach the control plane. |
 | `429` | `Local memory pressure: available RAM below safety margin` | The gateway refused the request to avoid forcing the Mac into swap. Retry later. |
 | `500` | `ollama returned status N` | The local provider failed (e.g. model not found, provider down). |
 | `400` | unmarshal error | Malformed JSON body. |
 
-Every failure is also written to the telemetry stream with an `error` field, so
-a failed request is visible on the operations display rather than disappearing.
+**Not every failure reaches the operations display.** Only the gateway telemetry
+stream carries an `error` field; the control and frontend streams have no such
+field and are written on their success path alone. Two consequences worth knowing
+when you go looking for a failed request:
+
+- **A refusal is in no stream at all.** A `409`, or any other non-`200` from the
+  control plane, returns before either layer writes telemetry — so the denial is
+  visible to the client and nowhere else.
+- **A request you cancelled may lose its frontend line.** The frontend writes its
+  line *after* proxying rather than deferring it, so a client that disconnects
+  after the target has already answered can leave a control line with no frontend
+  twin. The target's own stream still shows it, and can even show it as a success.
 
 ---
 

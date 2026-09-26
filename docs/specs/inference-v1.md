@@ -63,15 +63,40 @@ The request is a standard OpenAI Chat Completion request, extended with a `routi
 
 ## 3. Control Plane Logic (The Routing Decision)
 
-When a request arrives at the Control plane (RPi4), it evaluates:
+When a request arrives at the Control plane (RPi4), it evaluates three inputs in
+priority order: **model locality**, then **privacy**, then **latency class**.
 
-1. **Privacy check**: If `LOCAL_ONLY` and Mac is down $\rightarrow$ `503 Service Unavailable`.
-2. **Resource check**:
-   - If `latency_class == interactive` $\rightarrow$ Route to Cloud (subject to 3-parallel cap).
-   - If `latency_class == batch` $\rightarrow$ Route to Local (Mac).
-3. **Concurrency check**:
-   - If Cloud is at 3/3 $\rightarrow$ queue request or spill to Local (if privacy allows).
-4. **Model Mapping**: Map the `model` alias (e.g., `local-brain`) to the specific resident model on the Gateway (e.g., `granite4:3b`).
+1. **Model locality**: a model whose Ollama tag ends in `cloud` or
+   `<size>-cloud` is cloud-hosted and cannot be served by the Mac, so naming one
+   routes to the cloud regardless of the `routing` object. See
+   [`lattice-control.md`](lattice-control.md) §2.1.
+2. **Privacy check**: If `LOCAL_ONLY` and Mac is down → `503 Service Unavailable`.
+3. **Resource check**:
+   - If `latency_class == interactive` → Route to Cloud.
+   - If `latency_class == batch`, or `latency_class` is absent → Route to Local (Mac).
+4. **Model Mapping**: Map the `model` alias (e.g., `local-brain`) to the specific resident model on the Gateway (e.g., `granite4:3b`). A literal model name is passed through unchanged.
+
+Two things this section used to claim that are **not** true of the running code,
+recorded so the drift stays visible:
+
+- **There is no fallback from local to cloud, and no spill when cloud is busy.**
+  A request that decided local and finds no healthy gateway returns `503`; a
+  `LOCAL_ONLY` request can never be satisfied by the cloud. The cloud
+  concurrency cap this step referred to is not enforced at all —
+  [`lattice-control.md`](lattice-control.md) §4.
+- **`LOCAL_ONLY` naming a cloud-hosted model returns `409 Conflict`**, naming the
+  model. The two cannot be reconciled: the cloud violates the privacy rule and
+  the Mac does not have the model. It is refused rather than promoted to cloud or
+  re-routed to a target that would fail anonymously.
+
+### 3.1 A routing envelope is optional
+
+An agent runtime built on an OpenAI SDK names a model and sends no `routing`
+object. That is a supported client, not a malformed one: both `privacy` and
+`latency_class` may be absent, and the model tag alone is then enough to reach
+the right target. The correlation id is likewise optional — the frontend mints
+one when the client supplies none, so an agent's runs still reach the Bee screen
+under a real key.
 
 ## 4. Gateway Logic (The Execution)
 

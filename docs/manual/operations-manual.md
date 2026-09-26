@@ -354,7 +354,14 @@ it. The gateway is built around that fact:
 - **Serialised inference.** Local inference runs one request at a time
   (a slot semaphore), so two large models never coexist in RAM.
 - **KV cache quantisation.** `q8_0` by default keeps the cache small.
-- **Cloud concurrency cap.** Cloud requests are gated at 3 in parallel.
+
+> **The cloud concurrency cap is not enforced.** It is listed in
+> [`lattice-control.md`](../specs/lattice-control.md) §4 as a 3-parallel gate,
+> but the counter is incremented and decremented around a send that never
+> blocks, so it always reads zero — `/status` reports `"cloud_active": 0` even
+> with cloud requests in flight. Cloud work does not load the Mac's RAM, so
+> this is not a memory-safety hole; it *is* a limit the documentation claimed
+> and the code does not impose.
 
 **Operational note.** The Mac's hibernation mode writes a full-size sleepimage
 to disk on every sleep — this, not swap, is the largest recurring disk write.
@@ -378,11 +385,14 @@ vm_stat | grep -i swap          # Swapouts is the wear-relevant counter
 | `429 Memory pressure` | free RAM below the margin | close memory hogs on the Mac, or lower the context window |
 | `500 context deadline exceeded` on a local request | the Ollama bound elapsed before the answer finished — a genuinely slow request (large prompt, or many output tokens), not a hang | raise `LATTICE_GATEWAY_OLLAMA_TIMEOUT` (see §3.1); compare the prompt size against the `32768` ceiling |
 | `500 ollama returned status 404` | model id not pulled / not present in Ollama | `ollama pull <model>`, verify the capability map |
+| `409 Control plane: LOCAL_ONLY cannot be served by the cloud-only model "…"` | the request set `LOCAL_ONLY` *and* named a cloud-hosted model. The two are irreconcilable, so it is refused rather than promoted to cloud | drop `LOCAL_ONLY`, or name a model the Mac actually has |
+| A cloud model `404`s at the Mac | control read the name as local: a tag is the only locality signal, and this one has none (or the marker is misspelled) | use the exact tag Ollama publishes — `cloud`, or `<size>-cloud`; an untagged name is never treated as cloud, deliberately |
 | `Text file busy` on deploy | the binary is running | stop the service, copy, start — see §5 |
 | Frontend returns empty reply to a streaming client | the target streamed no content — e.g. a tool-calling request, which is unary-only — or the client did not send `stream: true` | confirm the client sent `stream: true`; the frontend now forwards the body untouched, so a dropped `stream` field is no longer a plausible cause |
 | A request fails and the model is the problem | the literal model sent does not exist at the decided target | the error names the model (`ollama pull <model>`); a capability alias lets policy pick a model that exists |
 | An agent's tool call comes back with empty `content` | the model answered with a tool call (`finish_reason: "tool_calls"`) rather than text, or the gateway's Ollama tool translation regressed | expected when `finish_reason` is `tool_calls`; otherwise check `finish_reason` and the gateway's tool translation — [gateway spec §3.1](../specs/lattice-gateway.md) |
 | Nothing on the Bee screen | feeder not running, or relay file not yet created | run the feeder in the foreground with `2>/tmp/feeder.log`; remember journald isn't persisted here |
+| Nothing on the Bee screen for a request you know failed | **both layers write telemetry only on their success path.** A refusal returns before the write, and the frontend proxies *then* logs rather than deferring — so a request whose client disconnects after the target has answered loses its frontend line | check the layers individually: control's decision may be in `telemetry-control.jsonl` with no frontend twin, and a refused request is in neither |
 | A `telemetry-gap … ERROR` line on the Bee screen | the gateway's ring evicted events before the pull reached them, or a restart lost some | expected and self-healing — the line *is* the report. Frequent occurrences mean the gateway is restarting often; check `launchctl print gui/$UID/com.lattice.gateway` |
 | Unit won't start after an env edit | the `EnvironmentFile` is missing or unreadable (it is **not** optional) | check `~/.config/lattice/*.env` exists and is owned by the service account |
 
@@ -410,6 +420,9 @@ its output buffers and the pipeline stalls.
 - [ ] a warm local request completes end-to-end (User Guide §5)
 - [ ] a `LOCAL_ONLY` request fails cleanly (503) when the gateway is stopped —
       verify it does **not** reach the cloud
+- [ ] a cloud-tagged model routes to cloud (e.g. `minimax-m3:cloud` →
+      `ollama-cloud-secondary` in `telemetry-control.jsonl`), and the same model
+      under `LOCAL_ONLY` is refused with `409` rather than promoted to cloud
 - [ ] swapout counter is flat under idle and under one inference
 
 ---

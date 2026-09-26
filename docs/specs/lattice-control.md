@@ -9,25 +9,73 @@ The Lattice Control plane is the intelligence of the system. It does not execute
 
 1. **Routing Decision**: Map an `inference.v1` request to a specific execution target (Mac Gateway or Cloud Provider).
 2. **Capability Registry**: Track which models are resident on the Mac and which are available in the cloud.
-3. **Concurrency Gating**: Enforce the 3-parallel cap on cloud requests.
-4. **Health Monitoring**: Detect if the Mac Gateway is down and trigger fallback to cloud.
+3. **Concurrency Gating**: *Not implemented* — the 3-parallel cloud cap was
+   intended here but is not enforced; see §4.
+4. **Health Monitoring**: Detect if the Mac Gateway is down, so a request that
+   decided `local` fails closed with `503` rather than reaching the cloud.
 
 ## 2. Routing Algorithm
 
-When a request arrives at the Control plane:
+The decision is one function of three inputs — `requiredCapability(privacy,
+latency_class, model)` — evaluated in this priority order:
 
-1. **Privacy Gate** (Hard):
-   - If `privacy == LOCAL_ONLY` and Mac Gateway is unhealthy $\rightarrow$ return `503 Service Unavailable` (Fail Closed).
-2. **Latency/Resource Path**:
-   - If `latency_class == interactive`:
-     - Attempt route to **Cloud**.
-     - Check Cloud Concurrency: If current parallel cloud calls $\ge 3$, queue the request or spill to **Local (Mac)** if privacy allows.
-   - If `latency_class == batch`:
-     - Route to **Local (Mac)**.
-3. **Fallback**:
-   - If target is Mac and Mac is unhealthy $\rightarrow$ route to Cloud (if privacy allows).
-4. **Decision**:
-   - Return the Target Endpoint + Model Mapping.
+1. **Model locality** (hardest, below only privacy). A model Ollama hosts in the
+   cloud cannot be served by the Mac at all, so naming one is a request for the
+   cloud even when the client sends no routing fields. See §2.1.
+2. **Privacy** (hard):
+   - `LOCAL_ONLY` → local. If no Mac gateway is healthy → `503 Service
+     Unavailable` (fail closed).
+3. **Latency class** (a preference, and the only input with a default):
+   - `interactive` → cloud.
+   - anything else, including absent → local.
+
+Then the target is resolved:
+
+- **Cloud**: the cheapest provider advertising the `cloud` capability wins
+  (`CostPerToken`), so adding a cheaper cloud provider takes the traffic without
+  a code change.
+- **Local**: the first healthy gateway advertising `local`.
+
+**There is no fallback from local to cloud.** A request that decided `local` and
+finds no healthy gateway returns `503 No healthy local gateway found`; it is
+never quietly re-routed to the cloud. Earlier drafts of this section described a
+fallback — that was never implemented, and implementing it is what `LOCAL_ONLY`
+exists to prevent.
+
+**Concurrency is not gated.** §4 describes a cap that does not hold; see the note
+there.
+
+### 2.1 Locality from the model tag
+
+`isCloudModel(model)` reads the marker Ollama puts in the tag: the substring
+after the **last** `:` is either `cloud` or `<size>-cloud`.
+
+| model | cloud? |
+|---|---|
+| `deepseek-v4.1-flash:cloud` | yes |
+| `nemotron-3-nano:30b-cloud` | yes |
+| `namespace/gpt-oss:120b-cloud` | yes |
+| `granite4:3b`, `hermes3:8b` | no |
+| `local-brain` (a capability alias) | no |
+| `mystery-cloud`, `foo:cloudy` (no tag / wrong tag) | no |
+
+**An untagged name is never cloud**, and that asymmetry is deliberate. The marker
+is the only locality signal a client can carry: an OpenAI-SDK agent names a model
+and sends no routing envelope. But guessing "this looks cloudish" risks sending a
+*local* model to the cloud, which `LOCAL_ONLY` forbids, whereas declining to
+guess can only send a cloud model to the Mac, where it fails loudly with its own
+name in the error. Failing loudly at the local target is the safe direction.
+
+**The one irreconcilable combination is refused.** `LOCAL_ONLY` naming a
+cloud-hosted model cannot be satisfied by either target, so it returns `409
+Conflict` naming the model:
+
+```
+LOCAL_ONLY cannot be served by the cloud-only model "minimax-m3:cloud"
+```
+
+It is never promoted to cloud (the privacy rule), and never re-routed to a Mac
+that does not have the model (an anonymous 404).
 
 ## 3. Capability Registry
 
@@ -91,10 +139,21 @@ context window costs in KV cache on that hardware
 
 ## 4. Concurrency Management
 
-The Control plane maintains a counter for active cloud requests.
-- `Increment` on dispatch to cloud.
-- `Decrement` on response from cloud.
-- Use a simple Go channel or atomic counter.
+**Recorded drift: the 3-parallel cloud cap is not enforced.** The intent was to
+gate cloud dispatch at three in flight and spill the fourth to the local
+gateway. What the code does is increment `cloudActive`, hand the decision to a
+*pre-allocated buffered* response channel, and decrement it again — a send that
+never blocks, so `cloudActive` is back to zero before the frontend has started
+proxying and a cap of three can never be reached. `GET /status` therefore
+reports `"cloud_active": 0` at all times, including while cloud requests are in
+flight. The `semaphore` channel in `dispatcher()` has the same shape and is
+released for the same reason.
+
+Consequence: cloud concurrency is bounded only by whatever the cloud endpoint
+does. The counter is a working gauge of nothing, and the spill-to-local path it
+was meant to trigger does not exist. Implementing it needs a design change —
+the decision would have to be handed out *after* a slot was secured, which
+means the frontend's proxy call has to be inside the gate, not outside it.
 
 ## 5. Implementation Plan
 
@@ -104,7 +163,7 @@ The Control plane maintains a counter for active cloud requests.
 - **Exit Test**:
   - Send an `interactive` request $\rightarrow$ Route to Cloud.
   - Send a `batch` request $\rightarrow$ Route to Mac.
-  - Send 4 concurrent `interactive` requests $\rightarrow$ 3 go to Cloud, 1 is queued/spilled.
+  - Send 4 concurrent `interactive` requests $\rightarrow$ 3 go to Cloud, 1 is queued/spilled. (**plan-ahead:** the cap is not enforced, so all 4 go to Cloud — §4.)
   - Mock Mac down $\rightarrow$ Route `LOCAL_PREFERRED` to Cloud. (**plan-ahead:**
     `LOCAL_PREFERRED` is not implemented — the policy table routes only
     `LOCAL_ONLY` to the local gateway with no fallback, and everything else by
