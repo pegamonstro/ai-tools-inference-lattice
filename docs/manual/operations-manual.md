@@ -336,7 +336,7 @@ vm_stat | grep -i swap          # Swapouts is the wear-relevant counter
 | `429 Memory pressure` | free RAM below the margin | close memory hogs on the Mac, or lower the context window |
 | `500 ollama returned status 404` | model id not pulled / not present in Ollama | `ollama pull <model>`, verify the capability map |
 | `Text file busy` on deploy | the binary is running | stop the service, copy, start — see §5 |
-| Frontend returns empty reply to a streaming client | a rebuild dropped the `stream` field somewhere on the proxy path | verify the field survives frontend → gateway |
+| Frontend returns empty reply to a streaming client | the target streamed no content — e.g. a tool-calling request, which is unary-only — or the client did not send `stream: true` | confirm the client sent `stream: true`; the frontend now forwards the body untouched, so a dropped `stream` field is no longer a plausible cause |
 | A request fails and the model is the problem | the literal model sent does not exist at the decided target | the error names the model (`ollama pull <model>`); a capability alias lets policy pick a model that exists |
 | An agent's tool call comes back with empty `content` | the model answered with a tool call (`finish_reason: "tool_calls"`) rather than text, or the gateway's Ollama tool translation regressed | expected when `finish_reason` is `tool_calls`; otherwise check `finish_reason` and the gateway's tool translation — [gateway spec §3.1](../specs/lattice-gateway.md) |
 | Nothing on the Bee screen | feeder not running, or relay file not yet created | run the feeder in the foreground with `2>/tmp/feeder.log`; remember journald isn't persisted here |

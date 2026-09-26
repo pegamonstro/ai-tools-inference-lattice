@@ -63,10 +63,14 @@ indistinguishable from a non-existent one to any client that probes first.
 
 ### 2.3 Correlation
 
-Every response carries an **`X-Request-Id`** header. The value is the client's
-`routing.request_id` when it supplied one, and a generated id otherwise, so the
-key is never blank. It is assigned **before** the Control call, so the same id
-appears in all three telemetry streams.
+The header is set on every `/v1/chat/completions` response the frontend proxies
+to a target — including a failure response from that target. It is **not** set on
+the discovery endpoints (`GET /v1/models`, `GET /health`), nor on an error
+returned before proxying (a malformed body, or a control-plane failure).
+
+The value is the client's `routing.request_id` when it supplied one, and a
+generated id otherwise, so the key is never blank. It is assigned **before** the
+Control call, so the same id appears in all three telemetry streams.
 
 ## 3. Exit Test (Phase 4)
 

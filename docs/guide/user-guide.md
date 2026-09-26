@@ -52,9 +52,9 @@ exact model on the local gateway. Use this when your client is configured with a
 real Ollama model id rather than a Lattice alias.
 
 > **A literal name is never silently dropped.** If you name a model, that name
-> reaches the target: an unknown one fails with the target's own error (a `500`
-> that names the model), never an empty model field. The name you sent is the
-> name telemetry shows.
+> reaches the target: an unknown one fails with the target's own error, never an
+> empty model field. The name you sent is the name telemetry shows — so the
+> failure is never anonymous.
 
 To see the aliases and the context ceiling, call `GET /v1/models`.
 
@@ -215,11 +215,15 @@ a failed request is visible on the operations display rather than disappearing.
 
 ## 8. Tracing a request
 
-Every response from Lattice carries an **`X-Request-Id`** header. If you set
-`routing.request_id`, that id is echoed back; if you send none, Lattice generates
-one and returns it there — so an id is always available even when your client has
-never heard of the `routing` envelope. Read the header if you did not supply an
-id and want to find the request in the logs.
+Every `/v1/chat/completions` response the frontend proxies to a target carries an
+**`X-Request-Id`** header, including a failure response from that target. (The
+discovery endpoints `GET /v1/models` and `GET /health` do not set it, and neither
+does an error returned before the request is proxied — a malformed body, or a
+control-plane failure.) If you set `routing.request_id`, that id is echoed back;
+if you send none, Lattice generates one and returns it there, so an id is always
+available for a proxied request even when your client has never heard of the
+`routing` envelope. Read the header if you did not supply an id and want to find
+the request in the logs.
 
 That id is attached to the control-plane decision, the frontend completion, and
 the gateway execution, so you can follow one request across all three planes in
