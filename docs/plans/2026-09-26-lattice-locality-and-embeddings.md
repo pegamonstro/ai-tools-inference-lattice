@@ -710,10 +710,8 @@ func TestHandleEmbeddingsForwardsWithoutARoutingEnvelope(t *testing.T) {
 	defer func() { controlURL, telemetryPath = oldControl, oldTelemetry }()
 
 	body := `{"model":"embeddinggemma:latest","input":"a brief about the routing rule","encoding_format":"float"}`
-	req := httptest.NewRequest("POST", "/v1/embeddings", strings.NewReader(body))
-	req.Header.Set("X-Request-Id", "req-embed")
 	rec := httptest.NewRecorder()
-	handleEmbeddings(rec, req)
+	handleEmbeddings(rec, httptest.NewRequest("POST", "/v1/embeddings", strings.NewReader(body)))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
@@ -730,8 +728,29 @@ func TestHandleEmbeddingsForwardsWithoutARoutingEnvelope(t *testing.T) {
 	if _, ok := sawBody["routing"]; ok {
 		t.Errorf("a routing envelope reached the embeddings path: %v", sawBody["routing"])
 	}
-	if sawHeader != "req-embed" {
-		t.Errorf("X-Request-Id = %q, want the client's id — the gateway line would be unkeyed", sawHeader)
+
+	// The id is the frontend's to mint — an embeddings body carries no routing
+	// envelope, and resolveRequestID only ever reads one — so the invariant here is
+	// correlation, not echo: the header the target saw must equal the id this layer
+	// logged, or the gateway's line is unkeyed and the request is correlatable in
+	// two streams out of three.
+	logged, err := os.ReadFile(telemetryPath)
+	if err != nil {
+		t.Fatalf("no frontend telemetry line: %v", err)
+	}
+	var line Telemetry
+	if err := json.Unmarshal(bytes.TrimSpace(logged), &line); err != nil {
+		t.Fatalf("frontend telemetry is not one JSON line: %v (%s)", err, logged)
+	}
+	if line.RequestID == "" {
+		t.Fatal("the frontend logged no request_id")
+	}
+	if sawHeader != line.RequestID {
+		t.Errorf("X-Request-Id = %q, want %q — the gateway's line would be unkeyed",
+			sawHeader, line.RequestID)
+	}
+	if line.Locality != "local" {
+		t.Errorf("frontend locality = %q, want local", line.Locality)
 	}
 }
 ```
