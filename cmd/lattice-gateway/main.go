@@ -28,10 +28,12 @@ type Routing struct {
 }
 
 type Request struct {
-	Model    string        `json:"model"`
-	Messages []interface{} `json:"messages"`
-	Stream   bool          `json:"stream"`
-	Routing  Routing       `json:"routing"`
+	Model      string        `json:"model"`
+	Messages   []interface{} `json:"messages"`
+	Stream     bool          `json:"stream"`
+	Tools      []interface{} `json:"tools,omitempty"`
+	ToolChoice interface{}   `json:"tool_choice,omitempty"`
+	Routing    Routing       `json:"routing"`
 }
 
 type Response struct {
@@ -49,9 +51,25 @@ type Choice struct {
 	FinishReason string  `json:"finish_reason"`
 }
 
+// ToolFunction is named rather than inlined so the response-building code below
+// can construct one without restating its tags, which are part of the type.
+type ToolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// ToolCall is the OpenAI shape. Ollama returns the same information with
+// arguments as a JSON object, which is translated in Execute.
+type ToolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function ToolFunction `json:"function"`
+}
+
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string     `json:"role"`
+	Content   string     `json:"content"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type Usage struct {
@@ -257,12 +275,21 @@ func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 	ollamaReq := map[string]interface{}{
 		"model":    req.Model,
 		"messages": req.Messages,
+		"tools":    req.Tools,
 		"stream":   false,
 		"options": map[string]interface{}{
 			"num_ctx":       contextWindow(req.Messages, maxTokens, req.Routing.ProviderParams),
 			"num_predict":   maxTokens,
 			"kv_cache_type": kvCacheType,
 		},
+	}
+
+	if len(req.Tools) == 0 {
+		// Ollama rejects tools: null; the key must simply be absent.
+		delete(ollamaReq, "tools")
+	}
+	if req.ToolChoice != nil {
+		ollamaReq["tool_choice"] = req.ToolChoice
 	}
 
 	body, _ := json.Marshal(ollamaReq)
@@ -286,12 +313,43 @@ func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 		Message struct {
 			Role    string `json:"role"`
 			Content string `json:"content"`
+			// Ollama's arguments are an object; OpenAI's are a string. Decoding
+			// as RawMessage and re-encoding below performs that translation
+			// without guessing at the inner shape.
+			ToolCalls []struct {
+				Function struct {
+					Name      string          `json:"name"`
+					Arguments json.RawMessage `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
 		} `json:"message"`
 		PromptEvalCount int `json:"prompt_eval_count"`
 		EvalCount       int `json:"eval_count"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&native); err != nil {
 		return nil, err
+	}
+
+	toolCalls := make([]ToolCall, 0, len(native.Message.ToolCalls))
+	for i, tc := range native.Message.ToolCalls {
+		args := string(tc.Function.Arguments)
+		if args == "" || args == "null" {
+			args = "{}"
+		}
+		toolCalls = append(toolCalls, ToolCall{
+			// Ollama issues no call id. OpenAI clients key the tool result on
+			// one, so it is synthesized deterministically per position.
+			ID:       fmt.Sprintf("call_%d", i),
+			Type:     "function",
+			Function: ToolFunction{Name: tc.Function.Name, Arguments: args},
+		})
+	}
+
+	finish := "stop"
+	if len(toolCalls) > 0 {
+		// The client's tool loop branches on this; "stop" with tool_calls
+		// present makes an agent end its turn instead of calling the tool.
+		finish = "tool_calls"
 	}
 
 	return &Response{
@@ -301,8 +359,8 @@ func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 		Model:   native.Model,
 		Choices: []Choice{{
 			Index:        0,
-			Message:      Message{Role: native.Message.Role, Content: native.Message.Content},
-			FinishReason: "stop",
+			Message:      Message{Role: native.Message.Role, Content: native.Message.Content, ToolCalls: toolCalls},
+			FinishReason: finish,
 		}},
 		Usage: Usage{
 			PromptTokens:     native.PromptEvalCount,
@@ -327,12 +385,20 @@ func (p *OllamaProvider) ExecuteStream(req Request, w http.ResponseWriter) (*Res
 	ollamaReq := map[string]interface{}{
 		"model":    req.Model,
 		"messages": req.Messages,
+		"tools":    req.Tools,
 		"stream":   true,
 		"options": map[string]interface{}{
 			"num_ctx":       contextWindow(req.Messages, maxTokens, req.Routing.ProviderParams),
 			"num_predict":   maxTokens,
 			"kv_cache_type": kvCacheType,
 		},
+	}
+	if len(req.Tools) == 0 {
+		// Ollama rejects tools: null; the key must simply be absent.
+		delete(ollamaReq, "tools")
+	}
+	if req.ToolChoice != nil {
+		ollamaReq["tool_choice"] = req.ToolChoice
 	}
 	body, _ := json.Marshal(ollamaReq)
 
