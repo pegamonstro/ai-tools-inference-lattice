@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -24,7 +25,7 @@ func TestToolCallsAreTranslatedToOpenAIShape(t *testing.T) {
 	defer ollama.Close()
 
 	p := &OllamaProvider{Endpoint: ollama.URL}
-	res, err := p.Execute(Request{
+	res, err := p.Execute(context.Background(), Request{
 		Model:    "hermes3:8b",
 		Messages: []interface{}{map[string]interface{}{"role": "user", "content": "weather?"}},
 		Tools:    []interface{}{map[string]interface{}{"type": "function"}},
@@ -70,7 +71,7 @@ func TestPlainAnswerOmitsToolCalls(t *testing.T) {
 	defer ollama.Close()
 
 	p := &OllamaProvider{Endpoint: ollama.URL}
-	res, err := p.Execute(Request{Model: "hermes3:8b", Messages: []interface{}{}})
+	res, err := p.Execute(context.Background(), Request{Model: "hermes3:8b", Messages: []interface{}{}})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestToolMessagesAreForwardedUnchanged(t *testing.T) {
 	defer ollama.Close()
 
 	p := &OllamaProvider{Endpoint: ollama.URL}
-	_, err := p.Execute(Request{
+	_, err := p.Execute(context.Background(), Request{
 		Model: "hermes3:8b",
 		Messages: []interface{}{
 			map[string]interface{}{"role": "assistant", "content": "", "tool_calls": []interface{}{}},

@@ -89,7 +89,42 @@ source. Defaults are shown; override in each process's environment (see §5).
 | `LATTICE_GATEWAY_MAX_CONTEXT` | `32768` | context window ceiling (advertised in `/health` as `max_context`) |
 | `LATTICE_GATEWAY_KV_CACHE` | `q8_0` | KV cache quantisation |
 | `LATTICE_GATEWAY_MEMORY_MARGIN_MB` | `1536` | free RAM the gateway refuses to cross (see §7) |
+| `LATTICE_GATEWAY_OLLAMA_TIMEOUT` | `20m` | Go duration bounding one call to Ollama (see §3.1) |
 | `LATTICE_GATEWAY_TELEMETRY` | `telemetry-gateway.jsonl` | gateway's local event buffer sink (CWD-relative) |
+
+#### 3.1 The inference timeout
+
+`LATTICE_GATEWAY_OLLAMA_TIMEOUT` bounds a single call to Ollama. Its meaning
+differs by path, and both are deliberate:
+
+- **Unary** (`stream: false`) — a total bound. The client sees nothing until the
+  answer is complete, so the bound has to cover prompt prefill **and** the whole
+  decoded reply. Ollama sends its headers only after generation finishes.
+- **Streaming** (`stream: true`) — a bound on *time to first byte* only. Ollama
+  sends headers once prefill finishes and the first token is ready, so a stalled
+  server is still caught, while a long answer is allowed to keep streaming. There
+  is no total bound on a stream; the caller's own context governs cancellation.
+
+Because the unary bound covers the whole reply, it must be generous. A default
+request may ask for up to 4096 output tokens, which at this hardware's measured
+decode rate of roughly **6.7 tok/s** needs about ten minutes on its own; prefill
+adds roughly a minute per few thousand prompt tokens at the measured **~40 tok/s**,
+so a normal worst case — a few thousand prompt tokens plus the full default output
+— lands near fourteen minutes. The 20-minute default exists to cover that with
+headroom, not to catch hangs quickly. A bound set below the time a normal request
+needs does not fail safe; it turns ordinary requests into
+`500 context deadline exceeded`, which is what a 5-minute bound did.
+
+A request whose prompt fills the context ceiling can outrun any sane bound —
+raise this rather than lower it if such prompts are expected.
+
+Raise it on slower or more loaded hardware; lower it on a faster host. The value
+is a Go duration string (`90s`, `30m`, `1h`); an unparseable or non-positive value
+falls back to the default.
+
+> A client that disconnects releases its in-flight inference — and its place in
+> the queue — so a long bound no longer risks pinning the gateway's single
+> inference slot.
 
 > **Note.** The control plane's telemetry sink is the one hard-coded path
 > (`/var/log/lattice/telemetry-control.jsonl`); it is not environment-driven.

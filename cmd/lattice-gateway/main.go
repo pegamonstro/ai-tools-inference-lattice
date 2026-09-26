@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -240,7 +241,7 @@ func (mb *MemoryBudgeter) CanAccommodate() bool {
 // --- Provider Abstraction ---
 
 type Provider interface {
-	Execute(req Request) (*Response, error)
+	Execute(ctx context.Context, req Request) (*Response, error)
 	Name() string
 }
 
@@ -248,7 +249,7 @@ type Provider interface {
 // SSE stream. handleInference type-asserts to it only when the client set stream:
 // true, so providers without streaming keep working unary.
 type StreamingProvider interface {
-	ExecuteStream(req Request, w http.ResponseWriter) (res *Response, committed bool, err error)
+	ExecuteStream(ctx context.Context, req Request, w http.ResponseWriter) (res *Response, committed bool, err error)
 }
 
 type OllamaProvider struct {
@@ -259,7 +260,7 @@ func (p *OllamaProvider) Name() string {
 	return "ollama"
 }
 
-func (p *OllamaProvider) Execute(req Request) (*Response, error) {
+func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, error) {
 	// Native /api/chat endpoint, not /v1/chat/completions: Ollama's OpenAI
 	// compat layer silently drops the "options" object, so num_ctx/kv_cache_type
 	// would never take effect there. The native endpoint honors options and
@@ -294,10 +295,12 @@ func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 
 	body, _ := json.Marshal(ollamaReq)
 
-	httpReq, _ := http.NewRequest("POST", targetURL.String(), bytes.NewBuffer(body))
+	// Bound to the caller's context so a client that disconnects releases the
+	// inference instead of leaving it to run to completion for nobody.
+	httpReq, _ := http.NewRequestWithContext(ctx, "POST", targetURL.String(), bytes.NewBuffer(body))
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := &http.Client{Timeout: ollamaTimeout()}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -378,7 +381,7 @@ func (p *OllamaProvider) Execute(req Request) (*Response, error) {
 // committed reports whether the SSE status and headers were already sent. Before
 // that point the caller can still surface a failure as an HTTP error; after it the
 // response is a 200 and the only thing left is to stop writing.
-func (p *OllamaProvider) ExecuteStream(req Request, w http.ResponseWriter) (*Response, bool, error) {
+func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.ResponseWriter) (*Response, bool, error) {
 	targetURL, _ := url.Parse(p.Endpoint + "/api/chat")
 	maxTokens := resolveMaxTokens(req)
 
@@ -402,12 +405,18 @@ func (p *OllamaProvider) ExecuteStream(req Request, w http.ResponseWriter) (*Res
 	}
 	body, _ := json.Marshal(ollamaReq)
 
-	httpReq, _ := http.NewRequest("POST", targetURL.String(), bytes.NewBuffer(body))
+	httpReq, _ := http.NewRequestWithContext(ctx, "POST", targetURL.String(), bytes.NewBuffer(body))
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Unlike the unary path this client has no fixed timeout: a streamed answer can
-	// legitimately run long, and the caller's request context governs cancellation.
-	resp, err := (&http.Client{}).Do(httpReq)
+	// Bound time-to-first-byte, not the whole stream. A streamed answer may
+	// legitimately run long, so there is no total timeout; but Ollama sends its
+	// headers only once prefill finishes and the first token is ready, so a stalled
+	// server is still caught here rather than pinning the inference slot forever.
+	// The caller's context, attached above, governs cancellation after that.
+	client := &http.Client{
+		Transport: &http.Transport{ResponseHeaderTimeout: ollamaTimeout()},
+	}
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, false, err
 	}
@@ -549,6 +558,44 @@ func kvCacheTypeFromEnv() string {
 	return "q8_0"
 }
 
+// ollamaTimeout bounds a single call to Ollama, configurable via
+// LATTICE_GATEWAY_OLLAMA_TIMEOUT (a Go duration, e.g. "30m").
+//
+// The default is deliberately generous rather than tight, because on this path the
+// bound covers prompt prefill *plus* the whole decoded answer, and both are slow
+// here: decoding runs at a measured ~6.7 tok/s, so the default request's 4096
+// output tokens need ~10 minutes by themselves, and prefill adds roughly a minute
+// per few thousand prompt tokens at the measured ~40 tok/s. A normal worst case —
+// a few thousand prompt tokens plus the full default output — therefore lands near
+// 14 minutes. 20m leaves that ~45% headroom; a tighter guard does not catch hangs,
+// it turns ordinary requests into 500s, which is what five minutes did.
+//
+// A request that fills the context ceiling can exceed any sane bound; raise this
+// rather than lowering it if such prompts are expected. A client that gives up
+// releases the inference through its context, so a long bound no longer risks
+// pinning the slot.
+func ollamaTimeout() time.Duration {
+	if v := latticeconfig.Env("LATTICE_GATEWAY_OLLAMA_TIMEOUT", ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 20 * time.Minute
+}
+
+// acquireSlot takes the single local-inference slot, reporting false if the
+// caller gave up while queued. Blocking forever on the slot would let an
+// abandoned request hold up every later one on a machine that can only run one
+// model at a time.
+func acquireSlot(ctx context.Context) bool {
+	select {
+	case inferenceSlots <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // resolveMaxTokens caps output length via the max_budget provider param
 // (default 4096). Shared by Execute and the telemetry path so both agree.
 func resolveMaxTokens(req Request) int {
@@ -621,6 +668,19 @@ var (
 	inferenceSlots = make(chan struct{}, 1)
 )
 
+// logQueuedCancel records a request whose client went away while it waited for
+// the inference slot. Nothing was sent to Ollama, so there is no status left to
+// report, but the gap would otherwise be invisible in the telemetry stream.
+func logQueuedCancel(req Request, ctxWindow int, t0 time.Time) {
+	logTelemetry(Telemetry{
+		RequestID:     req.Routing.RequestID,
+		Model:         req.Model,
+		ContextWindow: ctxWindow,
+		Elapsed:       time.Since(t0).Seconds(),
+		Error:         "client_cancelled_while_queued",
+	})
+}
+
 func handleInference(w http.ResponseWriter, r *http.Request) {
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -667,8 +727,11 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 	// chat clients stream by default and would otherwise render an empty reply.
 	if req.Stream {
 		if sp, ok := provider.(StreamingProvider); ok {
-			inferenceSlots <- struct{}{}
-			res, committed, err := sp.ExecuteStream(req, w)
+			if !acquireSlot(r.Context()) {
+				logQueuedCancel(req, ctxWindow, t0)
+				return
+			}
+			res, committed, err := sp.ExecuteStream(r.Context(), req, w)
 			<-inferenceSlots
 
 			te := Telemetry{
@@ -693,8 +756,11 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	inferenceSlots <- struct{}{}
-	res, err := provider.Execute(req)
+	if !acquireSlot(r.Context()) {
+		logQueuedCancel(req, ctxWindow, t0)
+		return
+	}
+	res, err := provider.Execute(r.Context(), req)
 	<-inferenceSlots
 
 	if err != nil {

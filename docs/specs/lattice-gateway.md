@@ -77,6 +77,34 @@ and the Control plane relays it — from here into `GET /capabilities`
 ([`lattice-control.md`](lattice-control.md) §3.3). A prompt that would need more
 than this ceiling is sized down to it.
 
+### 3.3 Concurrency, cancellation, and the inference timeout
+
+Local inference is **serialized**: the gateway holds a single slot, so only one
+model is resident at a time (step 2's budget check cannot stop two models loading
+concurrently; the slot does). A request takes the slot before calling Ollama and
+releases it after, on both the unary and streaming paths.
+
+**A caller's context reaches Ollama.** Both paths build their outbound request
+with the HTTP request's context, so a client that disconnects stops the inference
+rather than leaving it to run for nobody. The context also governs the queue: a
+client that goes away while waiting for the slot loses its place instead of
+holding it, recorded in telemetry as `client_cancelled_while_queued`.
+
+**The timeout is one knob, read differently per path**
+(`LATTICE_GATEWAY_OLLAMA_TIMEOUT`, default `20m`):
+
+| path | what the bound covers |
+|---|---|
+| unary | prefill **and** the whole decoded reply — Ollama's headers arrive only after generation finishes |
+| streaming | **time to first byte** only — headers arrive once prefill finishes and the first token is ready, so a stalled server is caught while a long answer keeps streaming |
+
+The unary bound must therefore be generous by construction, not tight: it covers a
+complete answer, and a default request may ask for up to 4096 output tokens. A
+bound below the time a normal request needs fails *open into errors* — ordinary
+requests die with `500 context deadline exceeded` — rather than failing safe. See
+[`operations-manual.md`](../manual/operations-manual.md) §3.1 for the sizing
+rationale and how to retune it.
+
 ## 4. Implementation Plan
 
 - **Language**: Go.
