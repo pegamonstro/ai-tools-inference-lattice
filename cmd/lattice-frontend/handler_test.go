@@ -25,7 +25,7 @@ func TestBuildProxyBodyPreservesClientFields(t *testing.T) {
 		"tools": [{"type": "function", "function": {"name": "get_weather"}}],
 		"tool_choice": "auto"
 	}`)
-	decision := Decision{Target: "mac-gateway", Endpoint: "http://example:8081", ModelName: "hermes3:8b"}
+	decision := Decision{Target: "mac-gateway", Locality: "local", Endpoint: "http://example:8081", ModelName: "hermes3:8b"}
 
 	out, err := buildProxyBody(raw, decision, "rid-1", map[string]interface{}{"reasoning_effort": "low"})
 	if err != nil {
@@ -69,7 +69,7 @@ func TestBuildProxyBodyStripsRoutingOnCloudPath(t *testing.T) {
 		"messages": [{"role": "user", "content": "hi"}],
 		"routing": {"privacy": "CLOUD_ALLOWED", "request_id": "client-chose-this"}
 	}`)
-	decision := Decision{Target: "ollama-cloud-primary", Endpoint: "http://example:11434", ModelName: "gemma4:31b-cloud"}
+	decision := Decision{Target: "ollama-cloud-primary", Locality: "cloud", Endpoint: "http://example:11434", ModelName: "gemma4:31b-cloud"}
 
 	out, err := buildProxyBody(raw, decision, "rid-2", nil)
 	if err != nil {
@@ -127,7 +127,7 @@ func TestHandleChatCorrelatesAllThreePlanes(t *testing.T) {
 		json.NewDecoder(r.Body).Decode(&got)
 		sawControlID = got.Routing.RequestID
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(Decision{Target: "mac-gateway", Endpoint: target.URL, ModelName: "hermes3:8b"})
+		json.NewEncoder(w).Encode(Decision{Target: "mac-gateway", Locality: "local", Endpoint: target.URL, ModelName: "hermes3:8b"})
 	}))
 	defer control.Close()
 
@@ -169,6 +169,14 @@ func TestHandleChatCorrelatesAllThreePlanes(t *testing.T) {
 	logged, err := os.ReadFile(telemetryPath)
 	if err != nil || !strings.Contains(string(logged), header) {
 		t.Errorf("frontend telemetry does not carry %q: %v %s", header, err, logged)
+	}
+
+	var line Telemetry
+	if err := json.Unmarshal(bytes.TrimSpace(logged), &line); err != nil {
+		t.Fatalf("frontend telemetry is not one JSON line: %v (%s)", err, logged)
+	}
+	if line.Locality != "local" {
+		t.Errorf("locality = %q, want local — the split cannot be built from a name", line.Locality)
 	}
 }
 
@@ -229,7 +237,7 @@ func TestHandleChatRecordsAnAbortedProxy(t *testing.T) {
 
 	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(Decision{Target: "mac-gateway", Endpoint: target.URL, ModelName: "granite4:3b"})
+		json.NewEncoder(w).Encode(Decision{Target: "mac-gateway", Locality: "local", Endpoint: target.URL, ModelName: "granite4:3b"})
 	}))
 	defer control.Close()
 
@@ -330,4 +338,46 @@ func TestHandleHealth(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)
 	}
+}
+
+// The envelope is injected because the target is local, not because its name is
+// mac-gateway. Keyed on the name, a second gateway — or a renamed one — would
+// silently stop receiving the envelope, and the loss is invisible: the gateway
+// still answers, it just answers an unkeyed request.
+func TestBuildProxyBodyKeysTheEnvelopeOnLocality(t *testing.T) {
+	raw := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+
+	t.Run("a local target is given an envelope whatever it is called", func(t *testing.T) {
+		out, err := buildProxyBody(raw,
+			Decision{Target: "a-second-gateway", Locality: "local", ModelName: "x"}, "rid-local", nil)
+		if err != nil {
+			t.Fatalf("buildProxyBody: %v", err)
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("output is not JSON: %v", err)
+		}
+		routing, ok := got["routing"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("a local target got no routing envelope: %v", got["routing"])
+		}
+		if routing["request_id"] != "rid-local" {
+			t.Errorf("routing.request_id = %v, want rid-local", routing["request_id"])
+		}
+	})
+
+	t.Run("the old literal no longer buys an envelope", func(t *testing.T) {
+		out, err := buildProxyBody(raw,
+			Decision{Target: "mac-gateway", Locality: "cloud", ModelName: "x"}, "rid-cloud", nil)
+		if err != nil {
+			t.Fatalf("buildProxyBody: %v", err)
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("output is not JSON: %v", err)
+		}
+		if _, ok := got["routing"]; ok {
+			t.Errorf("the name alone still injects an envelope: %v", got["routing"])
+		}
+	})
 }

@@ -35,6 +35,9 @@ type Decision struct {
 	Target    string `json:"target"`
 	Endpoint  string `json:"endpoint"`
 	ModelName string `json:"model_name"`
+	// Locality is the target's class as control derived it. The frontend reads it
+	// rather than the target's name, so it holds no copy of the rule.
+	Locality string `json:"locality"`
 }
 
 // buildProxyBody forwards the client's own body with only two rewrites: the
@@ -59,7 +62,7 @@ func buildProxyBody(raw []byte, decision Decision, requestID string, providerPar
 	// is replaced by the one the frontend issues, and on the cloud path it must
 	// not appear at all.
 	delete(body, "routing")
-	if decision.Target == "mac-gateway" {
+	if decision.Locality == "local" {
 		routing := map[string]interface{}{"request_id": requestID}
 		if providerParams != nil {
 			routing["provider_params"] = providerParams
@@ -75,6 +78,7 @@ type Telemetry struct {
 	TotalTime     float64 `json:"total_time_s"`
 	ExecutionTime float64 `json:"execution_time_s"`
 	Target        string  `json:"target"`
+	Locality      string  `json:"locality"`
 	Model         string  `json:"model,omitempty"`
 	Error         string  `json:"error,omitempty"`
 }
@@ -178,6 +182,12 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		if tele.RequestID == "" {
 			tele.RequestID = resolveRequestID(Routing{})
 		}
+		// A refusal never reached a decision, and a control plane running behind
+		// this binary reports no locality at all. Neither is a reason for the line
+		// to leave the split: unknown is countable, absent is not.
+		if tele.Locality == "" {
+			tele.Locality = "unknown"
+		}
 		tele.TotalTime = time.Since(tTotalStart).Seconds()
 		if !tExecStart.IsZero() {
 			tele.ExecutionTime = time.Since(tExecStart).Seconds()
@@ -232,6 +242,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("Routed [%s] to %s (%s)\n", req.Routing.RequestID, decision.Target, decision.Endpoint)
 	tele.Target = decision.Target
+	tele.Locality = decision.Locality
 	tele.Model = decision.ModelName
 
 	// 2. Rewrite request for Target
