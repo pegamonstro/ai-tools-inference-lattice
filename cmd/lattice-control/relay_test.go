@@ -34,7 +34,7 @@ func TestPlanRelay(t *testing.T) {
 			wantSeed: true, wantNext: 250, wantLost: -1,
 		},
 		{
-			name:  "a known cursor of zero is NOT a fresh start",
+			name: "a known cursor of zero is NOT a fresh start",
 			// Regression: a resync can legitimately land on zero. Treating that
 			// as "unknown" makes every later poll re-seed and swallow the next
 			// event -- which is how a request went missing during development.
