@@ -43,7 +43,14 @@ The request is a standard OpenAI Chat Completion request, extended with a `routi
 
 - `privacy`:
   - `LOCAL_ONLY`: Hard gate. Must execute on Mac. Fail closed if unavailable.
-  - `LOCAL_PREFERRED`: Prefer Mac. Cloud fallback allowed if Mac is unavailable.
+  - `LOCAL_PREFERRED`: **Not implemented.** The intended meaning was "prefer Mac,
+    fall back to cloud if Mac is unavailable", but the Control plane's policy
+    table has never implemented it: it routes `LOCAL_ONLY` to the local gateway
+    with no fallback, and everything else by latency class. A request carrying
+    `LOCAL_PREFERRED` is therefore treated as "anything else" — routed by its
+    latency class, not by this level's stated preference. Recorded here so the
+    drift is visible rather than rediscovered; do not implement it without a
+    design change.
   - `CLOUD_ALLOWED`: Any provider.
 - `latency_class`:
   - `interactive`: User is waiting. Cloud-first routing to minimize wall-clock.

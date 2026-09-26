@@ -19,18 +19,23 @@ transport.
 base URL   http://<frontend-host>:8080/v1
 path       /v1/chat/completions
 API key    anything (ignored)
-model      a capability alias, NOT a model name   ← the one real difference
+model      a capability alias — or any literal model name, passed through
 ```
 
 There is **one** entry point (the frontend). You never talk to the control
 plane or the gateway directly in normal use.
 
+You can check what is available before you call: `GET /v1/models` lists the
+aliases and the context ceiling, and `GET /health` reports liveness.
+
 ---
 
-## 2. Model aliases
+## 2. Model names: alias or literal
 
-Lattice routes on *intent*, not on a model name. The `model` field is a
-**capability alias** that the control plane resolves to a real model per target:
+There are two ways to fill the `model` field.
+
+**A capability alias.** Lattice routes on *intent*, not on a model name. The
+alias is resolved by the control plane to a real model per target:
 
 | alias | local model | cloud model |
 |---|---|---|
@@ -41,9 +46,17 @@ Ask for `local-coder` and you get the 8B local model on the Mac — or, if the
 request is interactive and cloud is permitted, the cloud model instead. The
 choice is made for you.
 
-> **This is the single most common integration mistake.** A tool that sends
-> `model: "gpt-4o"` will resolve to an empty model and fail. Configure your
-> client's model setting to an alias above.
+**A literal model name.** Any string that is not one of the aliases above is
+passed through **verbatim** as the model to run. `model: "hermes3:8b"` runs that
+exact model on the local gateway. Use this when your client is configured with a
+real Ollama model id rather than a Lattice alias.
+
+> **A literal name is never silently dropped.** If you name a model, that name
+> reaches the target: an unknown one fails with the target's own error (a `500`
+> that names the model), never an empty model field. The name you sent is the
+> name telemetry shows.
+
+To see the aliases and the context ceiling, call `GET /v1/models`.
 
 ---
 
@@ -202,11 +215,21 @@ a failed request is visible on the operations display rather than disappearing.
 
 ## 8. Tracing a request
 
-Set `routing.request_id` to something unique. That id is attached to the
-control-plane decision, the frontend completion, and the gateway execution, so
-you can follow one request across all three planes in the telemetry logs. See
+Every response from Lattice carries an **`X-Request-Id`** header. If you set
+`routing.request_id`, that id is echoed back; if you send none, Lattice generates
+one and returns it there — so an id is always available even when your client has
+never heard of the `routing` envelope. Read the header if you did not supply an
+id and want to find the request in the logs.
+
+That id is attached to the control-plane decision, the frontend completion, and
+the gateway execution, so you can follow one request across all three planes in
+the telemetry logs. See
 [Observability](../handbook/architecture-handbook.md#telemetry-pipeline) in the
 handbook.
+
+> **Tool calls are unary-only.** Tool calling works on the unary path; a streamed
+> request is not translated to `tool_calls`. If your client uses tools, send
+> `stream: false`.
 
 ---
 

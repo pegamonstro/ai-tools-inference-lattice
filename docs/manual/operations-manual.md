@@ -77,6 +77,7 @@ source. Defaults are shown; override in each process's environment (see §5).
 |---|---|---|
 | `LATTICE_FRONTEND_ADDR` | `:8080` | the public entry point |
 | `LATTICE_CONTROL_URL` | `http://127.0.0.1:8082/route` | control plane decision endpoint |
+| `LATTICE_CONTROL_CAPABILITIES_URL` | `http://127.0.0.1:8082/capabilities` | control plane capabilities endpoint, read to answer `GET /v1/models` |
 | `LATTICE_FRONTEND_TELEMETRY` | `/var/log/lattice/telemetry-frontend.jsonl` | frontend telemetry sink |
 
 ### Gateway (Mac)
@@ -85,7 +86,7 @@ source. Defaults are shown; override in each process's environment (see §5).
 |---|---|---|
 | `LATTICE_GATEWAY_ADDR` | `:8081` | gateway listen address |
 | `LATTICE_OLLAMA_URL` | `http://localhost:11434` | local Ollama |
-| `LATTICE_GATEWAY_MAX_CONTEXT` | `32768` | context window ceiling |
+| `LATTICE_GATEWAY_MAX_CONTEXT` | `65536` | context window ceiling (advertised in `/health` as `max_context`) |
 | `LATTICE_GATEWAY_KV_CACHE` | `q8_0` | KV cache quantisation |
 | `LATTICE_GATEWAY_MEMORY_MARGIN_MB` | `1536` | free RAM the gateway refuses to cross (see §7) |
 | `LATTICE_GATEWAY_TELEMETRY` | `telemetry-gateway.jsonl` | gateway's local event buffer sink (CWD-relative) |
@@ -336,7 +337,8 @@ vm_stat | grep -i swap          # Swapouts is the wear-relevant counter
 | `500 ollama returned status 404` | model id not pulled / not present in Ollama | `ollama pull <model>`, verify the capability map |
 | `Text file busy` on deploy | the binary is running | stop the service, copy, start — see §5 |
 | Frontend returns empty reply to a streaming client | a rebuild dropped the `stream` field somewhere on the proxy path | verify the field survives frontend → gateway |
-| Cloud request returns empty model | client sent a real model name instead of a capability alias | use `local-brain` / `local-coder` |
+| A request fails and the model is the problem | the literal model sent does not exist at the decided target | the error names the model (`ollama pull <model>`); a capability alias lets policy pick a model that exists |
+| An agent's tool call comes back with empty `content` | the model answered with a tool call (`finish_reason: "tool_calls"`) rather than text, or the gateway's Ollama tool translation regressed | expected when `finish_reason` is `tool_calls`; otherwise check `finish_reason` and the gateway's tool translation — [gateway spec §3.1](../specs/lattice-gateway.md) |
 | Nothing on the Bee screen | feeder not running, or relay file not yet created | run the feeder in the foreground with `2>/tmp/feeder.log`; remember journald isn't persisted here |
 | A `telemetry-gap … ERROR` line on the Bee screen | the gateway's ring evicted events before the pull reached them, or a restart lost some | expected and self-healing — the line *is* the report. Frequent occurrences mean the gateway is restarting often; check `launchctl print gui/$UID/com.lattice.gateway` |
 | Unit won't start after an env edit | the `EnvironmentFile` is missing or unreadable (it is **not** optional) | check `~/.config/lattice/*.env` exists and is owned by the service account |

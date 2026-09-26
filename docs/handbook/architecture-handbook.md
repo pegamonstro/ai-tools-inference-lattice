@@ -297,9 +297,13 @@ misconfiguration that would otherwise surface only as unexplained 503s.
 
 These have each cost real debugging time.
 
-- **The frontend rebuilds the request body field by field.** Any field not
-  explicitly copied is *silently dropped*. `stream` was lost this way and
-  streaming clients received empty replies — the gateway was innocent.
+> **A struct decode drops fields as silently as a whitelist does.** The frontend
+> rebuilt its proxy body from named fields and lost `tools`; the gateway then
+> decoded into a struct with no `tools` field and lost them again, one hop
+> later — and nothing in either handler mentioned the field, so neither looked
+> wrong. A whitelist at least names what it discards. When proxying, forward the
+> caller's body and rewrite only what routing requires.
+
 - **Go sniffs `Content-Type`.** `json.NewEncoder(w).Encode(...)` without an
   explicit header yields `text/plain; charset=utf-8`. Set it.
 - **A pre-stream failure can still be a status code; a post-stream failure

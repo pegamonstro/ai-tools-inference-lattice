@@ -64,6 +64,7 @@ have each cost real debugging time.
 | [`lattice-scheduling.md`](specs/lattice-scheduling.md) | latency classes, concurrency, slot semantics |
 | [`lattice-observability.md`](specs/lattice-observability.md) | telemetry streams and the Bee feeder contract |
 | [`lattice-failure.md`](specs/lattice-failure.md) | failure semantics and the `LOCAL_ONLY` guarantee |
+| [`lattice-agent-surface.md`](specs/lattice-agent-surface.md) | the agent-facing surface: body passthrough, literal model names, discovery endpoints, tool calling, the context ceiling |
 | [`lattice-rpi3.md`](specs/lattice-rpi3.md) | the retired RPi3 security-appliance spec — **out of scope**, kept as a record |
 
 ---

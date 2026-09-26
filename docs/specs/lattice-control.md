@@ -32,10 +32,62 @@ When a request arrives at the Control plane:
 ## 3. Capability Registry
 
 A map of model *aliases* (capabilities) to their local and cloud model names:
+
 - `local-brain` $\rightarrow$ `{local: granite4:3b, cloud: gemma4:31b-cloud}`
 - `local-coder` $\rightarrow$ `{local: hermes3:8b, cloud: deepseek-v4-pro:cloud}`
 
-The alias selects a capability (brain vs coder); the routing decision then picks the local or cloud model name for that capability.
+The alias selects a capability (brain vs coder); the routing decision then picks
+the local or cloud model name for that capability.
+
+### 3.1 Model resolution: alias or literal
+
+`resolveModel(model, target)` maps the client's `model` field to the name sent to
+the target, in one of two modes:
+
+| input | mode | behaviour |
+|---|---|---|
+| a **capability alias** (a key in the map above) | policy chooses | resolved per target — the alias's `local` name when the target is the gateway, its `cloud` name when the target is cloud |
+| **anything else** | literal passthrough | returned **verbatim** as `model_name` |
+
+**The guard: `model_name` is never empty.** If the client named something, that
+name is what reaches the target, and the target's own error is the report. On the
+local path an unknown model produces Ollama's `404`, surfaced as a `500` carrying
+the model id, so telemetry shows the name that failed. An earlier version looked
+the name up in the capability map and used the zero value on a miss, so a literal
+model arrived empty and failed *anonymously*. The bug was never that a bad name
+fails — it is that it failed with nothing naming it.
+
+> **Why no name→capability table.** It would have to be maintained, would lose
+> the client's exact model identity, and would break the moment either side
+> renames a model. Passthrough plus a real error is smaller and truer.
+
+### 3.2 `GET /capabilities`
+
+Control serves the client-facing namespace — the capability aliases, sorted by
+id — together with the context ceiling the gateway will honour:
+
+```json
+{
+  "context_length": 65536,
+  "capabilities": [
+    { "id": "local-brain", "local": "granite4:3b", "cloud": "gemma4:31b-cloud" },
+    { "id": "local-coder", "local": "hermes3:8b", "cloud": "deepseek-v4-pro:cloud" }
+  ]
+}
+```
+
+The frontend reads this to build `GET /v1/models`
+([`lattice-frontend.md`](lattice-frontend.md) §2.2), so the gateway's real
+ceiling is discoverable rather than invisible.
+
+### 3.3 Gateway context ceiling
+
+Control stores `gatewayMaxContext`: the ceiling the gateway advertises. It is
+refreshed on each 10-second health poll from the gateway's `/health` payload
+(`max_context`), because the gateway — not Control — is the authority on what a
+context window costs in KV cache on that hardware
+([`lattice-gateway.md`](lattice-gateway.md) §3.2). `gatewayMaxContext` is what
+`GET /capabilities` reports as `context_length`.
 
 ## 4. Concurrency Management
 
