@@ -264,6 +264,27 @@ type StreamingProvider interface {
 
 type OllamaProvider struct {
 	Endpoint string
+
+	// transportOnce guards transport. Every call must go through the same
+	// transport: a transport built per request cannot reuse connections, and
+	// because a zero-value transport never expires its idle ones, each streamed
+	// answer strands a connection that is never closed again.
+	transportOnce sync.Once
+	transport     *http.Transport
+}
+
+// httpTransport is the provider's one transport, built on first use so it picks
+// up the configured timeout. Cloning http.DefaultTransport keeps its dial and
+// TLS timeouts, its proxy handling and its cap on idle connections; only the
+// header bound differs, because a streamed answer legitimately outlives any
+// total request timeout.
+func (p *OllamaProvider) httpTransport() *http.Transport {
+	p.transportOnce.Do(func() {
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.ResponseHeaderTimeout = ollamaTimeout()
+		p.transport = t
+	})
+	return p.transport
 }
 
 func (p *OllamaProvider) Name() string {
@@ -310,7 +331,7 @@ func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, e
 	httpReq, _ := http.NewRequestWithContext(ctx, "POST", targetURL.String(), bytes.NewBuffer(body))
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: ollamaTimeout()}
+	client := &http.Client{Transport: p.httpTransport(), Timeout: ollamaTimeout()}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -423,9 +444,7 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 	// headers only once prefill finishes and the first token is ready, so a stalled
 	// server is still caught here rather than pinning the inference slot forever.
 	// The caller's context, attached above, governs cancellation after that.
-	client := &http.Client{
-		Transport: &http.Transport{ResponseHeaderTimeout: ollamaTimeout()},
-	}
+	client := &http.Client{Transport: p.httpTransport()}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, false, err
