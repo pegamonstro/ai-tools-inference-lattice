@@ -234,25 +234,39 @@ is the wrong direction for this project; the alternative of disabling memory
 leaves the orchestrator amnesiac between units; and the cost is bounded by the
 slot, so it is a *serial* cost rather than concurrent load. §9.2 required it to
 be **measured** rather than assumed. Measured on 2026-09-26 against
-`granite4:3b` with `embeddinggemma:latest` on the Mac: a warm chat turn took
-**0.10 s** (median of five, all with identical one-token output), the embedding
-**1.23 s**, and the same chat turn immediately after the embedding **1.54 s** —
-a reload penalty of **1.44 s**. The five warm turns — the 2.96 s first call
-carried the model load and is excluded — all fell between 0.08 s and 0.12 s,
-including the two taken after the second interleave, so the penalty is the
-interleave and not drift.
+`granite4:3b` with `embeddinggemma:latest` on the Mac, at `num_ctx` 2048: a warm
+chat turn took **0.10 s** (median of five, all with identical one-token output),
+the embedding **1.23 s**, and the same chat turn immediately after the embedding
+**1.54 s** — a reload penalty of **1.44 s**. The five warm turns — the 2.96 s
+first call carried the model load and is excluded — all fell between 0.08 s and
+0.12 s, including the two taken after the second interleave, so the penalty is
+the interleave and not drift.
 
 Two things that figure settles, both against the guess it replaces. The reload
 does **not** hide behind the prefill: at roughly 14× a warm turn it dominates a
 short turn rather than being absorbed by it. And it is that small largely
-because the gateway keeps the context small: `contextWindow` sizes `num_ctx` to
-the prompt, starting at 2048 and doubling until the prompt fits, with the KV
-cache quantized to q8_0. This one-token workload got 2048 — the value the
-telemetry line records — not the 32768 ceiling. The same reload at Ollama's
-default context measured 8.8 s and grew residency to 12.7 GB of this 16 GB host,
-enough to trip the memory margin and make the gateway report unhealthy. The
-acceptance above therefore stands against the ~220 s turns it is written for,
-where 1.4 s is under 1% of one turn — not because prefill absorbs the reload.
+because the gateway keeps the context small — `contextWindow` sizes `num_ctx` to
+the prompt, starting at 2048 and doubling until the prompt plus its output
+budget fits, capped at 32768, with the KV cache quantized to q8_0. This
+one-token workload got 2048, the value the telemetry line records.
+
+That figure is also the smallest case, and the acceptance is not written for it.
+A build-loop turn carries the ~13k-token harness tax measured for that loop,
+which resolves to the **32768** ceiling — `contextWindow` doubles 2048 → 32768
+before that prompt fits. Measured at 32768 with the same q8_0 cache, the reload
+is **2.2 s** (median of three: 2.21, 2.58, 1.84 s), with the resident model at
+4.9 GB against 2.2 GB at 2048. So the cost is **2.2 s per interleave** at the
+shape the caller actually runs. That is still about 1% of a ~220 s turn, which
+is the acceptance's claim — but it now rests on a figure taken at that shape
+rather than at the smallest context available.
+
+The cost does rise with context, and by more than the doubling alone suggests:
+the same reload under Ollama's own defaults measured 8.8 s and 12.7 GB of this
+16 GB host, enough to trip the memory margin and make the gateway report
+unhealthy. That comparison moves two variables at once — a larger context *and*
+an unquantized cache — so it bounds the direction rather than isolating either.
+What it establishes is that the capped context and the q8_0 cache are what keep
+the reload affordable; it is not a property of the model.
 
 ## 5. Corrections to the record
 
