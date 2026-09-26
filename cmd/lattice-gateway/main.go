@@ -88,7 +88,11 @@ type Telemetry struct {
 	Elapsed          float64 `json:"elapsed_s"`
 	PromptTokens     int     `json:"prompt_tokens"`
 	CompletionTokens int     `json:"completion_tokens"`
-	Error            string  `json:"error,omitempty"`
+	// Locality is stamped in logTelemetry, not by callers: this process is the
+	// local executor, so the value is constant, and setting it in one place makes
+	// it true by construction at every call site.
+	Locality string `json:"locality"`
+	Error    string `json:"error,omitempty"`
 }
 
 // TelemetryEvent tags a buffered event with a monotonic sequence so a remote
@@ -124,6 +128,12 @@ var (
 )
 
 func logTelemetry(t Telemetry) {
+	// Constant, and set here rather than by callers so no call site can forget
+	// it. The gateway has no target field and does not gain one: its provenance
+	// is this process, and locality is the one shared dimension the three streams
+	// need.
+	t.Locality = "local"
+
 	telemetryMutex.Lock()
 	telemetrySeq++
 	telemetryRing = append(telemetryRing, TelemetryEvent{Seq: telemetrySeq, Boot: telemetryBoot, Telemetry: t})
