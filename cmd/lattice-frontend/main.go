@@ -78,9 +78,10 @@ type Telemetry struct {
 
 var controlURL = latticeconfig.Env("LATTICE_CONTROL_URL", "http://127.0.0.1:8082/route")
 
+var telemetryPath = latticeconfig.Env("LATTICE_FRONTEND_TELEMETRY", "/var/log/lattice/telemetry-frontend.jsonl")
+
 func logTelemetry(t Telemetry) {
-	path := latticeconfig.Env("LATTICE_FRONTEND_TELEMETRY", "/var/log/lattice/telemetry-frontend.jsonl")
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(telemetryPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Printf("Telemetry error: %v\n", err)
 		return
@@ -88,6 +89,18 @@ func logTelemetry(t Telemetry) {
 	defer f.Close()
 	b, _ := json.Marshal(t)
 	f.Write(append(b, '\n'))
+}
+
+// resolveRequestID uses the client's id when it supplied one, and otherwise
+// mints one. An agent runtime has never heard of Lattice, so requiring the field
+// meant its runs reached the Bee screen with a blank correlation key. The
+// generated id is time-based on purpose: it sorts, so the display reads
+// chronologically without parsing.
+func resolveRequestID(r Routing) string {
+	if r.RequestID != "" {
+		return r.RequestID
+	}
+	return fmt.Sprintf("req-%d", time.Now().UnixNano())
 }
 
 func handleChat(w http.ResponseWriter, r *http.Request) {
@@ -98,6 +111,10 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// Assigned before the control call so control logs the same id the gateway
+	// and the frontend will use.
+	req.Routing.RequestID = resolveRequestID(req.Routing)
 
 	// 1. Ask Control Plane for Decision
 	decisionReq, _ := json.Marshal(req)
@@ -142,6 +159,8 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	r.URL.Path = "/v1/chat/completions"
 	r.Body = io.NopCloser(bytes.NewBuffer(finalBodyBytes))
 	r.ContentLength = int64(len(finalBodyBytes))
+
+	w.Header().Set("X-Request-Id", req.Routing.RequestID)
 
 	proxy.ServeHTTP(w, r)
 

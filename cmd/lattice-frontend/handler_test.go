@@ -2,6 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -87,5 +91,81 @@ func TestBuildProxyBodyStripsRoutingOnCloudPath(t *testing.T) {
 func TestBuildProxyBodyRejectsNonObject(t *testing.T) {
 	if _, err := buildProxyBody([]byte(`"just a string"`), Decision{ModelName: "x"}, "rid", nil); err == nil {
 		t.Error("expected an error for a non-object body")
+	}
+}
+
+func TestResolveRequestIDKeepsAClientSuppliedID(t *testing.T) {
+	if got := resolveRequestID(Routing{RequestID: "client-id"}); got != "client-id" {
+		t.Errorf("got %q, want the client's own id", got)
+	}
+}
+
+func TestResolveRequestIDGeneratesWhenAbsent(t *testing.T) {
+	got := resolveRequestID(Routing{})
+	if got == "" {
+		t.Fatal("generated id is empty — telemetry would be uncorrelatable")
+	}
+	if other := resolveRequestID(Routing{}); other == got {
+		t.Errorf("two generated ids collided (%q) — they must be unique per request", got)
+	}
+}
+
+// The id must be set before the control call, not merely before the proxy call:
+// control is posted the typed request, so an id assigned later is one control
+// never logged and the run is correlatable in two planes out of three.
+func TestHandleChatCorrelatesAllThreePlanes(t *testing.T) {
+	var sawControlID, sawTargetID string
+
+	// Declared before the control handler that closes over it: the closure runs
+	// at request time, but the name must already be in scope for it to compile.
+	var target *httptest.Server
+
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got Request
+		json.NewDecoder(r.Body).Decode(&got)
+		sawControlID = got.Routing.RequestID
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(Decision{Target: "mac-gateway", Endpoint: target.URL, ModelName: "hermes3:8b"})
+	}))
+	defer control.Close()
+
+	target = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&got)
+		if routing, ok := got["routing"].(map[string]interface{}); ok {
+			sawTargetID, _ = routing["request_id"].(string)
+		}
+		if _, ok := got["tools"]; !ok {
+			t.Error("tools did not survive the frontend")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-x","choices":[]}`))
+	}))
+	defer target.Close()
+
+	oldControl, oldTelemetry := controlURL, telemetryPath
+	controlURL = control.URL
+	telemetryPath = t.TempDir() + "/telemetry-frontend.jsonl"
+	defer func() { controlURL, telemetryPath = oldControl, oldTelemetry }()
+
+	body := `{"model":"local-coder","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handleChat(rec, req)
+
+	header := rec.Header().Get("X-Request-Id")
+	if header == "" {
+		t.Fatal("no X-Request-Id header on the response")
+	}
+	if sawControlID != header {
+		t.Errorf("control saw %q, response advertised %q", sawControlID, header)
+	}
+	if sawTargetID != header {
+		t.Errorf("target saw %q, response advertised %q", sawTargetID, header)
+	}
+
+	logged, err := os.ReadFile(telemetryPath)
+	if err != nil || !strings.Contains(string(logged), header) {
+		t.Errorf("frontend telemetry does not carry %q: %v %s", header, err, logged)
 	}
 }
