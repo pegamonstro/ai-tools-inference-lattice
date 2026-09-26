@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/pegamonstro/ai-tools-inference-lattice/pkg/latticeconfig"
@@ -74,6 +75,8 @@ type Telemetry struct {
 	TotalTime     float64 `json:"total_time_s"`
 	ExecutionTime float64 `json:"execution_time_s"`
 	Target        string  `json:"target"`
+	Model         string  `json:"model,omitempty"`
+	Error         string  `json:"error,omitempty"`
 }
 
 var controlURL = latticeconfig.Env("LATTICE_CONTROL_URL", "http://127.0.0.1:8082/route")
@@ -160,9 +163,33 @@ func resolveRequestID(r Routing) string {
 
 func handleChat(w http.ResponseWriter, r *http.Request) {
 	tTotalStart := time.Now()
-	bodyBytes, _ := io.ReadAll(r.Body)
+
 	var req Request
+	var tExecStart time.Time
+
+	// The line is deferred, not written after proxying, because the proxy aborts
+	// the handler when its write to the client fails — a client that disconnects
+	// mid-response used to take the frontend line with the unwind, leaving a
+	// control line with no twin. Every exit path now draws exactly one line,
+	// refusal included: a refusal is the event the routing policy exists to
+	// produce, and it used to reach no stream at all.
+	tele := Telemetry{}
+	defer func() {
+		// Keyed even when the body never parsed: a line the display cannot group
+		// is a line it cannot show, and an unparsable body is worth showing.
+		if tele.RequestID == "" {
+			tele.RequestID = resolveRequestID(Routing{})
+		}
+		tele.TotalTime = time.Since(tTotalStart).Seconds()
+		if !tExecStart.IsZero() {
+			tele.ExecutionTime = time.Since(tExecStart).Seconds()
+		}
+		logTelemetry(tele)
+	}()
+
+	bodyBytes, _ := io.ReadAll(r.Body)
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+		tele.Error = err.Error()
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -170,6 +197,11 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	// Assigned before the control call so control logs the same id the gateway
 	// and the frontend will use.
 	req.Routing.RequestID = resolveRequestID(req.Routing)
+	tele.RequestID = req.Routing.RequestID
+	// The requested name, until the decision replaces it with the resolved one:
+	// a request that never got a decision is still identified by what it asked
+	// for.
+	tele.Model = req.Model
 
 	// 1. Ask Control Plane for Decision
 	decisionReq, _ := json.Marshal(req)
@@ -178,6 +210,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Post(controlURL, "application/json", bytes.NewBuffer(decisionReq))
 	if err != nil {
+		tele.Error = "control plane unavailable or timed out"
 		http.Error(w, "Control plane unavailable or timed out", http.StatusServiceUnavailable)
 		return
 	}
@@ -187,27 +220,32 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		// Propagate the control plane's error status and message (e.g. 503
 		// "No healthy local gateway found") instead of masking it as a 500.
 		body, _ := io.ReadAll(resp.Body)
+		tele.Error = strings.TrimSpace(string(body))
 		http.Error(w, "Control plane: "+string(body), resp.StatusCode)
 		return
 	}
 
 	var decision Decision
 	if err := json.NewDecoder(resp.Body).Decode(&decision); err != nil {
+		tele.Error = "invalid decision from control plane"
 		http.Error(w, "Invalid decision from control plane", http.StatusInternalServerError)
 		return
 	}
 
 	fmt.Printf("Routed [%s] to %s (%s)\n", req.Routing.RequestID, decision.Target, decision.Endpoint)
+	tele.Target = decision.Target
+	tele.Model = decision.ModelName
 
 	// 2. Rewrite request for Target
 	finalBodyBytes, err := buildProxyBody(bodyBytes, decision, req.Routing.RequestID, req.Routing.ProviderParams)
 	if err != nil {
+		tele.Error = err.Error()
 		http.Error(w, "Malformed request body", http.StatusBadRequest)
 		return
 	}
 
 	// 3. Proxy to Target
-	tExecStart := time.Now()
+	tExecStart = time.Now()
 	targetURL, _ := url.Parse(decision.Endpoint)
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
@@ -218,16 +256,6 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Request-Id", req.Routing.RequestID)
 
 	proxy.ServeHTTP(w, r)
-
-	executionTime := time.Since(tExecStart).Seconds()
-	totalTime := time.Since(tTotalStart).Seconds()
-
-	logTelemetry(Telemetry{
-		RequestID:     req.Routing.RequestID,
-		TotalTime:     totalTime,
-		ExecutionTime: executionTime,
-		Target:        decision.Target,
-	})
 }
 
 func main() {

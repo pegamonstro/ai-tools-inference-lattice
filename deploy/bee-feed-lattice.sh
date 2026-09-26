@@ -28,23 +28,26 @@ try:
 except Exception:
     sys.exit(1)
 rid = d.get("request_id", "?")
-if "decision_time_s" in d:
+model = d.get("model", "")
+# The error is checked first and for all three streams. A refusal carries no
+# target and no elapsed time, so branching on the stream first would render a
+# denial as a successful route — the failure would be on the display as a
+# success, which is worse than it being absent.
+err = d.get("error", "")
+if err:
+    print("%s %s ERROR %s" % (rid, model, err))
+elif "decision_time_s" in d:
     print("route %s: %s/%s -> %s (%s)" % (
         rid, d.get("privacy", ""), d.get("latency_class", ""),
-        d.get("target", ""), d.get("model", "")))
+        d.get("target", ""), model))
 elif "total_time_s" in d:
     print("%s done: %s %.1fs" % (
         rid, d.get("target", ""), d.get("total_time_s", 0)))
 elif "elapsed_s" in d:
-    model = d.get("model", "")
-    err = d.get("error", "")
-    if err:
-        print("%s %s ERROR %s" % (rid, model, err))
-    else:
-        print("%s %s ctx=%s %s+%stok %.1fs" % (
-            rid, model, d.get("context_window", 0),
-            d.get("prompt_tokens", 0), d.get("completion_tokens", 0),
-            d.get("elapsed_s", 0)))
+    print("%s %s ctx=%s %s+%stok %.1fs" % (
+        rid, model, d.get("context_window", 0),
+        d.get("prompt_tokens", 0), d.get("completion_tokens", 0),
+        d.get("elapsed_s", 0)))
 else:
     sys.exit(1)
 ' 2>/dev/null) || continue

@@ -1,11 +1,94 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
+
+// A refusal used to reach no telemetry stream: every failure path returned
+// before the write, so the one event the routing policy exists to produce — the
+// denial — was the one event the display never showed.
+func TestHandleRouteRecordsARefusal(t *testing.T) {
+	old := telemetryPath
+	telemetryPath = t.TempDir() + "/telemetry-control.jsonl"
+	defer func() { telemetryPath = old }()
+
+	body := `{"model":"minimax-m3:cloud","messages":[],"routing":{"privacy":"LOCAL_ONLY","request_id":"req-refused"}}`
+	rec := httptest.NewRecorder()
+	handleRoute(rec, httptest.NewRequest("POST", "/route", strings.NewReader(body)))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusConflict)
+	}
+
+	logged, err := os.ReadFile(telemetryPath)
+	if err != nil {
+		t.Fatalf("a refusal wrote no telemetry: %v", err)
+	}
+	var got Telemetry
+	if err := json.Unmarshal(bytes.TrimSpace(logged), &got); err != nil {
+		t.Fatalf("telemetry is not one JSON line: %v (%s)", err, logged)
+	}
+	if got.Error == "" {
+		t.Error("the refusal recorded no error — the display cannot tell it from a routed decision")
+	}
+	if got.Model != "minimax-m3:cloud" {
+		t.Errorf("model = %q, want the name that was refused", got.Model)
+	}
+	if got.RequestID != "req-refused" {
+		t.Errorf("request_id = %q, want the client's id", got.RequestID)
+	}
+	if got.Target != "" {
+		t.Errorf("target = %q, want empty — no target was chosen", got.Target)
+	}
+}
+
+// The fail-closed path is the sovereignty guarantee, and it was invisible for the
+// same reason: the 503 returned before the write.
+func TestHandleRouteRecordsAFailClosedDecision(t *testing.T) {
+	old := telemetryPath
+	telemetryPath = t.TempDir() + "/telemetry-control.jsonl"
+	defer func() { telemetryPath = old }()
+
+	// Nothing has polled the gateway, so none is healthy.
+	healthMutex.Lock()
+	oldHealthy := gatewayHealthy
+	gatewayHealthy = map[string]bool{}
+	healthMutex.Unlock()
+	defer func() {
+		healthMutex.Lock()
+		gatewayHealthy = oldHealthy
+		healthMutex.Unlock()
+	}()
+
+	body := `{"model":"granite4:3b","messages":[],"routing":{"privacy":"LOCAL_ONLY","request_id":"req-failclosed"}}`
+	rec := httptest.NewRecorder()
+	handleRoute(rec, httptest.NewRequest("POST", "/route", strings.NewReader(body)))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+
+	logged, err := os.ReadFile(telemetryPath)
+	if err != nil {
+		t.Fatalf("a fail-closed decision wrote no telemetry: %v", err)
+	}
+	var got Telemetry
+	if err := json.Unmarshal(bytes.TrimSpace(logged), &got); err != nil {
+		t.Fatalf("telemetry is not one JSON line: %v (%s)", err, logged)
+	}
+	if got.Error == "" {
+		t.Error("the fail-closed decision recorded no error")
+	}
+	if got.Model != "granite4:3b" {
+		t.Errorf("model = %q, want the model that could not be served", got.Model)
+	}
+}
 
 // The client's model field means one of two things: a capability alias, in which
 // case policy picks the model, or a literal model name, in which case the client

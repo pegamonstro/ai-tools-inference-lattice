@@ -44,6 +44,7 @@ type Telemetry struct {
 	Model        string  `json:"model"`
 	Privacy      string  `json:"privacy"`
 	LatencyClass string  `json:"latency_class"`
+	Error        string  `json:"error,omitempty"`
 }
 
 type Provider struct {
@@ -116,8 +117,10 @@ var (
 	cloudActive       int32
 )
 
+var telemetryPath = latticeconfig.Env("LATTICE_CONTROL_TELEMETRY", "/var/log/lattice/telemetry-control.jsonl")
+
 func logTelemetry(t Telemetry) {
-	f, err := os.OpenFile("/var/log/lattice/telemetry-control.jsonl", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(telemetryPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Printf("Telemetry error: %v\n", err)
 		return
@@ -554,12 +557,31 @@ func handleCapabilities(w http.ResponseWriter, r *http.Request) {
 
 func handleRoute(w http.ResponseWriter, r *http.Request) {
 	t0 := time.Now()
-	bodyBytes, _ := io.ReadAll(r.Body)
+
 	var req Request
+
+	// Every exit path draws exactly one line, refusal included. A refusal is the
+	// event the routing policy exists to produce — the denial is the point — and
+	// it used to be the one event with no telemetry at all: each failure path
+	// returned before the write below.
+	tele := Telemetry{}
+	defer func() {
+		tele.RequestID = req.Routing.RequestID
+		tele.DecisionTime = time.Since(t0).Seconds()
+		tele.Privacy = req.Routing.Privacy
+		tele.LatencyClass = req.Routing.LatencyClass
+		logTelemetry(tele)
+	}()
+
+	bodyBytes, _ := io.ReadAll(r.Body)
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+		tele.Error = err.Error()
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Until a decision names the resolved model, the request is identified by
+	// what it asked for — a request that never got a decision still has a name.
+	tele.Model = req.Model
 
 	fmt.Printf("Routing Request [%s]: Model=%s, Privacy=%s, Latency=%s\n",
 		req.Routing.RequestID, req.Model, req.Routing.Privacy, req.Routing.LatencyClass)
@@ -571,6 +593,7 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 	// 1. Determine Target Capability
 	requiredCap, err := requiredCapability(req.Routing.Privacy, req.Routing.LatencyClass, req.Model)
 	if err != nil {
+		tele.Error = err.Error()
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
@@ -620,15 +643,20 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if !found {
+			tele.Error = "No healthy local gateway found"
 			http.Error(w, "No healthy local gateway found", http.StatusServiceUnavailable)
 			return
 		}
 	}
 
 	if targetID == "" {
+		tele.Error = "No suitable provider found"
 		http.Error(w, "No suitable provider found", http.StatusServiceUnavailable)
 		return
 	}
+
+	tele.Target = targetID
+	tele.Model = modelName
 
 	decision := Decision{
 		Target:    targetID,
@@ -651,15 +679,6 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 		}
 		decision = <-respCh
 	}
-
-	logTelemetry(Telemetry{
-		RequestID:    req.Routing.RequestID,
-		DecisionTime: time.Since(t0).Seconds(),
-		Target:       targetID,
-		Model:        modelName,
-		Privacy:      req.Routing.Privacy,
-		LatencyClass: req.Routing.LatencyClass,
-	})
 
 	json.NewEncoder(w).Encode(decision)
 }

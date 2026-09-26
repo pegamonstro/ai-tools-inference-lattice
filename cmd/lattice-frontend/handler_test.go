@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -169,6 +171,101 @@ func TestHandleChatCorrelatesAllThreePlanes(t *testing.T) {
 		t.Errorf("frontend telemetry does not carry %q: %v %s", header, err, logged)
 	}
 }
+
+// A refusal is the one event the routing policy exists to produce, and it used to
+// draw no telemetry from either layer: every failure path returned before the
+// telemetry write, so the denial was visible to the client and nowhere else. The
+// denial must be the most visible event, not the least.
+func TestHandleChatRecordsARefusal(t *testing.T) {
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `LOCAL_ONLY cannot be served by the cloud-only model "minimax-m3:cloud"`, http.StatusConflict)
+	}))
+	defer control.Close()
+
+	oldControl, oldTelemetry := controlURL, telemetryPath
+	controlURL = control.URL
+	telemetryPath = t.TempDir() + "/telemetry-frontend.jsonl"
+	defer func() { controlURL, telemetryPath = oldControl, oldTelemetry }()
+
+	body := `{"model":"minimax-m3:cloud","messages":[{"role":"user","content":"hi"}],"routing":{"privacy":"LOCAL_ONLY"}}`
+	rec := httptest.NewRecorder()
+	handleChat(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusConflict)
+	}
+
+	logged, err := os.ReadFile(telemetryPath)
+	if err != nil {
+		t.Fatalf("a refusal wrote no telemetry: %v", err)
+	}
+	var got Telemetry
+	if err := json.Unmarshal(bytes.TrimSpace(logged), &got); err != nil {
+		t.Fatalf("telemetry is not one JSON line: %v (%s)", err, logged)
+	}
+	if got.Error == "" {
+		t.Error("the refusal recorded no error, so the display cannot tell it from a success")
+	}
+	if strings.HasSuffix(got.Error, "\n") {
+		t.Error("the recorded error carries a trailing newline, which breaks the display line")
+	}
+	if got.Model != "minimax-m3:cloud" {
+		t.Errorf("model = %q, want the name that was refused", got.Model)
+	}
+	if got.RequestID == "" {
+		t.Error("the refusal is unkeyed — the display cannot group it")
+	}
+}
+
+// The proxy aborts the handler when its write to the client fails, unwinding
+// handleChat; while the log was written after proxying, it went with the unwind.
+// A request the control plane recorded then had no frontend twin — reproduced
+// live with a streamed request whose client disconnected mid-response.
+func TestHandleChatRecordsAnAbortedProxy(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"chatcmpl-x","choices":[]}`))
+	}))
+	defer target.Close()
+
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(Decision{Target: "mac-gateway", Endpoint: target.URL, ModelName: "granite4:3b"})
+	}))
+	defer control.Close()
+
+	oldControl, oldTelemetry := controlURL, telemetryPath
+	controlURL = control.URL
+	telemetryPath = t.TempDir() + "/telemetry-frontend.jsonl"
+	defer func() { controlURL, telemetryPath = oldControl, oldTelemetry }()
+
+	body := `{"model":"granite4:3b","messages":[{"role":"user","content":"hi"}]}`
+
+	func() {
+		// The abort is the case under test, not a failure of the test.
+		defer func() { _ = recover() }()
+		handleChat(&goneClient{header: http.Header{}}, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+	}()
+
+	logged, err := os.ReadFile(telemetryPath)
+	if err != nil || len(bytes.TrimSpace(logged)) == 0 {
+		t.Fatalf("an aborted request wrote no telemetry: %v %q", err, logged)
+	}
+	var got Telemetry
+	if err := json.Unmarshal(bytes.TrimSpace(logged), &got); err != nil {
+		t.Fatalf("telemetry is not one JSON line: %v (%s)", err, logged)
+	}
+	if got.Model != "granite4:3b" {
+		t.Errorf("model = %q, want the model that ran", got.Model)
+	}
+}
+
+// goneClient is a ResponseWriter whose every write fails — a client that has
+// disconnected, as the handler sees it.
+type goneClient struct{ header http.Header }
+
+func (g *goneClient) Header() http.Header         { return g.header }
+func (g *goneClient) WriteHeader(statusCode int)  {}
+func (g *goneClient) Write(p []byte) (int, error) { return 0, errors.New("client is gone") }
 
 func TestHandleModelsListsTheCapabilityNamespace(t *testing.T) {
 	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
