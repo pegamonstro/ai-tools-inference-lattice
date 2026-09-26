@@ -36,6 +36,39 @@ type Decision struct {
 	ModelName string `json:"model_name"`
 }
 
+// buildProxyBody forwards the client's own body with only two rewrites: the
+// resolved model name, and the routing envelope (which belongs to the local
+// translation layer only — a cloud endpoint speaks plain OpenAI and rejects it).
+//
+// It deliberately does not enumerate the fields it forwards. Enumerating is what
+// broke this: the previous version rebuilt the body from model, messages and
+// stream, so `tools` was dropped and an agent lost the ability to call anything.
+func buildProxyBody(raw []byte, decision Decision, requestID string, providerParams map[string]interface{}) ([]byte, error) {
+	var body map[string]interface{}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	if body == nil {
+		return nil, fmt.Errorf("request body is not a JSON object")
+	}
+
+	body["model"] = decision.ModelName
+
+	// The client's own routing envelope is never forwarded: on the local path it
+	// is replaced by the one the frontend issues, and on the cloud path it must
+	// not appear at all.
+	delete(body, "routing")
+	if decision.Target == "mac-gateway" {
+		routing := map[string]interface{}{"request_id": requestID}
+		if providerParams != nil {
+			routing["provider_params"] = providerParams
+		}
+		body["routing"] = routing
+	}
+
+	return json.Marshal(body)
+}
+
 type Telemetry struct {
 	RequestID     string  `json:"request_id"`
 	TotalTime     float64 `json:"total_time_s"`
@@ -95,28 +128,11 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("Routed [%s] to %s (%s)\n", req.Routing.RequestID, decision.Target, decision.Endpoint)
 
 	// 2. Rewrite request for Target
-	proxyBody := make(map[string]interface{})
-	proxyBody["model"] = decision.ModelName
-	proxyBody["messages"] = req.Messages
-	// Pass streaming through: the gateway honors it by replying with SSE, and the
-	// reverse proxy below flushes text/event-stream frames as they arrive. Dropping
-	// it here would silently downgrade streaming clients to an empty unary reply.
-	proxyBody["stream"] = req.Stream
-
-	// Forward request_id + provider_params to the local gateway (the translation
-	// layer). Cloud targets speak plain OpenAI and reject the routing envelope,
-	// so these are only forwarded on the local path. request_id lets the gateway
-	// correlate its telemetry with the control/frontend events.
-	if decision.Target == "mac-gateway" {
-		routing := map[string]interface{}{
-			"request_id": req.Routing.RequestID,
-		}
-		if req.Routing.ProviderParams != nil {
-			routing["provider_params"] = req.Routing.ProviderParams
-		}
-		proxyBody["routing"] = routing
+	finalBodyBytes, err := buildProxyBody(bodyBytes, decision, req.Routing.RequestID, req.Routing.ProviderParams)
+	if err != nil {
+		http.Error(w, "Malformed request body", http.StatusBadRequest)
+		return
 	}
-	finalBodyBytes, _ := json.Marshal(proxyBody)
 
 	// 3. Proxy to Target
 	tExecStart := time.Now()
