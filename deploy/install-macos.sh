@@ -25,9 +25,18 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
+# Tear down our own instance before anything looks at :8081, so a re-install picks
+# up template changes and the check below only ever sees a process launchd does not
+# own. "not loaded" is fine. Deliberately after the binary check above: failing
+# that must not leave the user with nothing running.
+launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+
 # A gateway started by hand (no LaunchAgent) holds :8081, so the managed one
 # would crash-loop on bind failure and KeepAlive would keep retrying forever.
 # Refuse rather than fight it — name the offender and let the operator decide.
+# Our own instance is already booted out, so a listener here is genuinely
+# unmanaged, and the "kill" below is advice that clears the condition rather than
+# one launchd keeps undoing.
 busy="$(lsof -nP -iTCP:8081 -sTCP:LISTEN -t 2>/dev/null || true)"
 if [[ -n "$busy" ]]; then
   for pid in $busy; do
@@ -44,8 +53,6 @@ mkdir -p "$LOG_DIR" "$(dirname "$DEST")"
 sed -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
   "$TEMPLATE" >"$DEST"
 
-# Bootout first so a re-install picks up template changes; "not loaded" is fine.
-launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 launchctl bootstrap "$DOMAIN" "$DEST"
 
 if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
