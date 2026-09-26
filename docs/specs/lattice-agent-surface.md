@@ -189,10 +189,53 @@ Manual, on the pair:
 
 ## 7. Reconciliation and recorded drift
 
-- **A parallel shim may already be under construction.** An external agent
-  platform is independently specifying a translation shim for Lattice, on the
-  premise (established above as false) that Lattice has no chat endpoint. It is
-  being allowed to land. When it does, its spec should be diffed against this
-  one and anything it got right folded in rather than discarded.
+- **A parallel shim was reconciled, not adopted** — see the subsection below. An
+  external agent platform had independently begun specifying a translation shim
+  for Lattice, on the premise (established above as false) that Lattice has no
+  chat endpoint. It was allowed to land and was diffed against this spec rather
+  than discarded.
 - **Recorded drift:** `LOCAL_PREFERRED` (§4). Spec promises it; the policy table
   does not implement it.
+
+### Reconciliation: the parallel shim, closed
+
+Recorded so a future reader does not mistake the parallel work for a silently
+dropped follow-up. It is closed; **no shim was adopted and no new process was
+added.**
+
+**The premise, and that it was false.** The shim rested on the claim that Lattice
+has no `/v1/chat/completions` endpoint. That claim came from probing `GET /health`
+and `GET /` alone — both of which returned 404 — which is exactly the discovery
+failure recorded in §2 gap 3. The route exists on the frontend (`:8080`) and
+returns a real completion.
+
+**Outcome.** The shim's author withdrew the premise and instead wrote a brief that
+*orders implementation of this committed spec* and explicitly forbids a new shim
+process. It is not launched. The only other artifact is a client-side patch that
+points a default model at a local one. **No shim code exists.**
+
+**Two findings the shim scoping surfaced, both folded in in writing:**
+
+- **Reachability.** The brief asserted the frontend binds loopback-only and that
+  Mac→Pi `:8080` is firewalled. Both are false: the listeners bind all interfaces
+  (`*:8080` / `*:8082`), and a probe from the Mac gateway reaches the frontend —
+  **404** on the frontend (a missing route, so a live listener) and **200** on
+  control's `/status`. The frontend is reachable across the private network, which
+  is what this surface requires. Had the brief been right, the design would have
+  needed a new listener or tunnel — new infrastructure, which invariant 5 forbids.
+- **Memory.** A client calling Ollama **directly** bypasses the gateway's `num_ctx`
+  cap and is the actual source of the Mac's memory pressure: observed live, the
+  gateway answered `503 Memory pressure high` while Ollama was healthy, because a
+  local model was resident with a `131072`-token context — roughly 13.7 GB on a
+  16 GB machine. Lattice caps context; a direct caller gets Ollama's default.
+  **Routing an agent through Lattice therefore *reduces* memory pressure rather
+  than adding to it** — a stronger argument for this surface than the policy one,
+  and stated plainly here.
+
+**No gap required a new task.** Both findings were already covered by this plan:
+the discovery surface (§3.3, Task 4) answers the misread; the context ceiling
+(§3.5, Tasks 4 and 6) answers the memory finding.
+
+**Decision recorded.** The plan deliberately let the parallel work land and
+reconciled afterward rather than blocking it. That was correct: the parallel
+artifact became a brief for *this* work rather than a competing design.
