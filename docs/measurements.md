@@ -153,3 +153,36 @@ that neither Ollama's default nor the gateway exercises. A larger host (more
 unified memory) or a CPU-only runner would be required to host a 20 B MoE
 without thrash. The dense-vs-MoE distinction does **not** change Lattice's
 sizing ceiling, which is still set by context and by total resident weights.
+
+## `num_gpu:0` (CPU-only) re-test — measured 2026-09-28
+
+`num_gpu:0` is Ollama's API switch for `--n-gpu-layers 0`. Re-testing
+`gpt-oss:20b` through it answers whether the mmap relief is reachable *without*
+a second provider. (`granite4:3b` under `num_gpu:0` was also checked: the option
+takes effect — `size_vram` → 0.0 — but a small dense model shows nothing,
+because every weight is hot every token; there are no inactive experts to page.)
+
+**It engages mmap — confirmed.** With `num_gpu:0`, `llama-server`'s RSS stayed
+~600–700 MB (collapsing 1.7 GB → 0.7 GB as it idled) while `/api/ps` reported
+`size 13.9 GB, size_vram 0.0`. The 13.9 GB of weights are **file-backed, not
+resident** — the same model under GPU offload held 10.5–11 GB RSS. This is the
+"inactive experts page from SSD" mechanism actually firing.
+
+**But it still does not fit on 16 GB.** The *load event* reads ~13.9 GB into the
+page cache, which forces macOS to push ~5–6 GB of *everything else* (other apps,
+and the host the gateway runs on) into swap: swap went 3.4 GB → 9.5 GB and kept
+climbing; free memory held at 34 %. The relief shrinks the model's *own*
+footprint but does not stop a 13.9 GB file from displacing the rest of a 16 GB
+host while it is read in.
+
+**Refined conclusion.** Two distinct facts, and the earlier one still stands:
+
+- Under **GPU offload (default)**, MoE gives no relief — all weights resident,
+  11 GB, no mmap.
+- Under **`num_gpu:0`**, the mmap relief *is* engaged (weights file-backed,
+  ~0.7 GB resident), but a 20 B MoE is still too large for 16 GB to *load without
+  displacing the host*. The relief is real and reachable through the existing
+  API — **no second provider needed** — but it only becomes comfortable on a
+  **larger-RAM host** (32 GB+), where a 13.9 GB mmap'd model leaves the OS and
+  apps untouched. The cost there is CPU-only token speed, unmeasured here and
+  expected to be low for a 20 B MoE.
