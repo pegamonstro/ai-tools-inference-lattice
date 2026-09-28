@@ -20,10 +20,14 @@ measurements land.
 | Model | Architecture | Weights | Class |
 |---|---|---|---|
 | `granite4:3b` | dense | 2.1 GB | default local |
+| `granite3-moe:1b` | **MoE** (1.3 B) | 0.8 GB | measured 2026-09-28 — fast general (below) |
+| `granite3-moe:3b` | **MoE** (3.4 B) | 2.1 GB | measured 2026-09-28 — fast general (below) |
+| `sam860/olmoe-1b-7b-0924` | **MoE** (6.9 B total / ~1.3 B active) | 3.0 GB | measured 2026-09-28 (below) |
 | `llama3.2:3b` | dense | 2.0 GB | — |
 | `gemma3:4b` | dense | 3.3 GB | — |
 | `mistral:latest` | dense (7b) | 4.4 GB | — |
 | `hermes3:8b` | dense | 4.7 GB | — |
+| `qwen2.5-coder:3b` | dense | 1.9 GB | measured 2026-09-28 — coding (below) |
 | `qwen2.5-coder:7b` | dense | 4.7 GB | coding |
 | `llama3.1:8b` | dense | 4.9 GB | — |
 | `command-r7b:7b` | dense | 5.1 GB | — |
@@ -186,3 +190,48 @@ host while it is read in.
   **larger-RAM host** (32 GB+), where a 13.9 GB mmap'd model leaves the OS and
   apps untouched. The cost there is CPU-only token speed, unmeasured here and
   expected to be low for a 20 B MoE.
+
+## Small MoE vs dense — measured 2026-09-28
+
+**Goal:** pick small MoE models for *general* routing and small dense models
+for *coding*, and verify how each behaves on the 16 GB host.
+
+**Protocol:** same prompt, `num_ctx` 2048, `num_predict` 128, `stream=false`,
+each model unloaded before the next so RSS is unambiguous. Warm tok/s is
+`eval_count / eval_duration` on the second (resident) call.
+
+| Model | Arch | Total params | Native ctx | Weights | Warm tok/s | Resident RSS | `size_vram` |
+|---|---|---|---|---|---|---|---|
+| `granite3-moe:1b` | MoE | 1.3 B | 4096 | 821 MB | **51.0** | 1.1 GB | 0.9 GB |
+| `granite3-moe:3b` | MoE | 3.4 B | 4096 | 2.1 GB | **25.7** | 2.2 GB | 2.2 GB |
+| `qwen2.5-coder:3b` | dense | 3.1 B | 32768 | 1.9 GB | 9.3 | 1.8 GB | 2.1 GB |
+| `sam860/olmoe-1b-7b-0924` | MoE | 6.9 B | 4096 | 3.0 GB | **18.4** | 3.2 GB | 3.3 GB |
+
+Swap held flat at ~3.1 GB throughout — all four fit without thrash.
+
+**Three conclusions:**
+
+1. **MoE relieves compute, not memory — now reproduced at small scale.**
+   `granite3-moe:3b` (3.4 B) runs 25.7 tok/s vs `qwen2.5-coder:3b` (3.1 B dense)
+   at 9.3 tok/s, ~2.8× faster at the *same* footprint. But resident RSS ≈
+   on-disk size for every model (2.2 GB → 2.2 GB; 3.3 GB → 3.2 GB): all experts
+   are resident under Ollama's default GPU offload. This is the same verdict as
+   the `gpt-oss:20b` test above, now confirmed on small MoE.
+
+2. **The speed win is the active-vs-total gap.** `olmoe` carries 6.9 B of
+   weights but only ~1.3 B are active per token, so it computes at 18.4 tok/s —
+   a 7 B model's knowledge at a 3 B model's compute cost. tok/s tracks *active*
+   params; RSS tracks *total* params. The two axes are decoupled, which is what
+   makes the small-MoE strategy viable here.
+
+3. **The caveat is context, not memory.** All three MoE models are 4096-context
+   native; `qwen2.5-coder:3b` is 32768. The MoE models cannot reach Lattice's
+   32768 ceiling, so a *general* request needing >4 K context must not land on
+   them.
+
+**Routing assignment (config, not code):** *general* → `granite3-moe:3b`
+(25.7 tok/s), with `granite3-moe:1b` as the ultra-fast fallback for trivial
+queries; *coding* → `qwen2.5-coder:3b` (dense, 32 K context), with
+`qwen2.5-coder:7b` as the larger option. The 4 K context ceiling on the MoE
+models is the one thing to guard: long-context general requests fall through to
+a dense or cloud path.
