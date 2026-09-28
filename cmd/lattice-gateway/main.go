@@ -912,7 +912,12 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp, err := http.Get(ollamaURL + "/api/tags")
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
+		http.Error(w, "Ollama unhealthy", http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
 		http.Error(w, "Ollama unhealthy", http.StatusServiceUnavailable)
 		return
 	}
