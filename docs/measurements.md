@@ -235,3 +235,91 @@ queries; *coding* → `qwen2.5-coder:3b` (dense, 32 K context), with
 `qwen2.5-coder:7b` as the larger option. The 4 K context ceiling on the MoE
 models is the one thing to guard: long-context general requests fall through to
 a dense or cloud path.
+
+## mmap multi-load — measured 2026-09-29
+
+**Goal:** verify the claim that `num_gpu:0` (mmap) lets several models be
+"loaded" at once cheaply, since file-backed weights are dropped rather than
+swapped when evicted.
+
+**Method:** load `granite3-moe:3b` and `qwen2.5-coder:3b` together under
+`num_gpu:0`, `keep_alive 30m`, then read each `llama-server`'s virtual (VSZ) and
+resident (RSS) size against the on-disk sizes (2.1 GB + 1.9 GB).
+
+| measure | value |
+|---|---|
+| `/api/ps` | both resident, `size_vram` 0.00 each (mmap engaged) |
+| `llama-server` virtual (VSZ) | **~427 GB per process** |
+| `llama-server` resident (RSS) | 1981 + 2511 = **~4.4 GB** total |
+| swap before → after | 3429 → 3429 MB (flat, no thrash) |
+
+**Two findings, one correcting the earlier framing:**
+
+1. **Virtual address space is effectively unbounded.** ~427 GB per process is
+   the mmap'd GGUF range — "loaded" costs almost nothing in virtual terms, so
+   there is no practical limit on how many models can be *mapped* at once.
+
+2. **Resident RSS came out ≈ sum of on-disk sizes, not the ~0.7 GB the
+   `gpt-oss:20b` test suggested.** The 0.7 GB figure was a *pressure* effect:
+   loading 13.9 GB forced macOS to drop clean file pages from the working set.
+   Here two small models = 4 GB on a mostly-idle host → no pressure → the pages
+   stay in page cache, so RSS stays high. Those pages are **clean and
+   file-backed**, so macOS drops them instantly when a real allocation needs the
+   RAM — high RSS here is reclaimable page cache, not committed memory.
+
+**Refined conclusion.** The mmap relief only *materializes* as low RSS under
+memory pressure; on an idle machine mmap'd weights sit in page cache looking
+resident. The metric that actually predicts thrash is therefore not RSS but the
+**dirty/anonymous** working set (KV cache + compute buffers), which is the only
+memory that ever touches swap. Swap staying flat through the double load is the
+real signal: two models resident with zero swap movement. For Lattice this does
+not change the single-slot design — the one axis mmap cannot relieve is the KV
+cache, which concurrent inference multiplies.
+
+## MLX vs llama.cpp (Ollama) — measured 2026-09-29
+
+**Goal:** answer whether Apple's MLX runtime beats Ollama's llama.cpp engine on
+decode, on the bandwidth-bound M1. This is the P1 gate for an MLX provider.
+
+**Protocol:** identical to "Small MoE vs dense" above — same prompt, 128
+tokens, warm (second, resident) call, decode-only tok/s (excluding prefill,
+matching Ollama's `eval_count / eval_duration`). MLX ran
+`mlx-community/Qwen2.5-Coder-3B-Instruct-4bit` (4-bit, group 64) via
+`mlx_lm.stream_generate`; Ollama's `qwen2.5-coder:3b` is Q4_K_M — the same
+model at the same width.
+
+| runtime | model | warm decode tok/s | peak RSS |
+|---|---|---|---|
+| Ollama (llama.cpp) | `qwen2.5-coder:3b` | 9.3 | ~1.8 GB |
+| MLX | `Qwen2.5-Coder-3B-Instruct-4bit` | **13.1 / 13.4** (two runs) | ~1.9 GB |
+
+**Result:** MLX decodes **~43 % faster** than llama.cpp on this M1, at the same
+resident memory. Two independent runs agreed (13.11, 13.41 tok/s), so it is not
+noise. Swap was flat (and *fell* slightly) through the MLX load/unload cycle —
+no thrash, and Ollama stayed healthy throughout.
+
+**Why it matters:** decode on the M1 is memory-bandwidth-bound, not
+compute-bound. The win is a runtime property — MLX's unified-memory path and
+Metal kernel schedule beat llama.cpp's, not a quantization difference (both
+4-bit). This is the *opposite* of the MoE finding: MoE changes the compute side
+(active params per token) but not the bandwidth side; MLX changes the bandwidth
+side directly.
+
+**Caveats that keep this from being a slam dunk:**
+
+1. **No concurrency.** MLX has no continuous batching; it serves one request at
+   a time. This is *irrelevant* to Lattice today, which already serialises the
+   local path (single inference slot), but it removes llama.cpp's one
+   throughput advantage should the design ever parallelise locally.
+2. **A second runtime.** MLX is a Python/Metal library, not a bundled server.
+   Using it means running an MLX inference process on the Mac alongside Ollama,
+   two resident runtimes competing for 16 GB. On the M1 that is memory-risky;
+   on the 32 GB M6 it becomes comfortable.
+3. **The M6 changes the calculus.** The M6's per-GPU-core Neural Accelerators
+   accelerate *prefill* (compute-bound) up to ~4-6× but give nothing on decode
+   (bandwidth-bound) — see
+   [`docs/specs/lattice-apple-acceleration.md`](../specs/lattice-apple-acceleration.md).
+
+**Conclusion:** MLX is a real ~43 % decode win on the current host, and the
+cleanest way to harvest it is an MLX provider on the larger (32 GB) machine
+rather than a second runtime squeezed onto 16 GB.
