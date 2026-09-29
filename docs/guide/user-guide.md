@@ -39,17 +39,18 @@ alias is resolved by the control plane to a real model per target:
 
 | alias | local model | cloud model |
 |---|---|---|
-| `local-brain` | `granite4:3b` | `gemma4:31b-cloud` |
-| `local-coder` | `hermes3:8b` | `deepseek-v4-pro:cloud` |
+| `local-brain` | `granite3-moe:3b` | `gemma4:31b-cloud` |
+| `local-coder` | `qwen2.5-coder:3b` | `deepseek-v4-pro:cloud` |
 
-Ask for `local-coder` and you get the 8B local model on the Mac — or, if the
-request is interactive and cloud is permitted, the cloud model instead. The
-choice is made for you.
+Ask for `local-brain` and you get the 3B MoE model on the Mac (fast — few active
+params per token); `local-coder` gets the 3B dense coder. If the request is
+interactive and cloud is permitted, the cloud model is used instead. The choice
+is made for you.
 
 **A literal model name.** Any string that is not one of the aliases above is
-passed through **verbatim** as the model to run. `model: "hermes3:8b"` runs that
-exact model on the local gateway. Use this when your client is configured with a
-real Ollama model id rather than a Lattice alias.
+passed through **verbatim** as the model to run. `model: "qwen2.5-coder:3b"` runs
+that exact model on the local gateway. Use this when your client is configured
+with a real Ollama model id rather than a Lattice alias.
 
 > **A literal name is never silently dropped.** If you name a model, that name
 > reaches the target: an unknown one fails with the target's own error, never an

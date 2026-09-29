@@ -81,8 +81,8 @@ The client's `model` field is **not** a model name — it is a capability alias
 resolved per target:
 
 ```go
-"local-brain": {local: "granite4:3b", cloud: "gemma4:31b-cloud"},
-"local-coder": {local: "hermes3:8b", cloud: "deepseek-v4-pro:cloud"},
+"local-brain": {local: "granite3-moe:3b", cloud: "gemma4:31b-cloud"},
+"local-coder": {local: "qwen2.5-coder:3b", cloud: "deepseek-v4-pro:cloud"},
 ```
 
 This is the single most important interface decision in the system: it lets a
