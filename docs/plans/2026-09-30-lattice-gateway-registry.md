@@ -558,6 +558,11 @@ func TestSelectGatewayLocalFiltersOnHostingAndSlot(t *testing.T) {
 	if _, err := selectGateway("local", "granite3-moe:3b", reg, map[string]bool{"mac": true}); err == nil {
 		t.Fatal("expected no match for zero-slot gateway")
 	}
+	// empty Models (not yet announced) hosts nothing — fail closed, not wildcard
+	reg["mac"] = gw("mac", []string{"local", "chat"}, nil, 1, 0)
+	if _, err := selectGateway("local", "granite3-moe:3b", reg, map[string]bool{"mac": true}); err == nil {
+		t.Fatal("expected no match for a local gateway that announced no models")
+	}
 }
 
 func TestSelectGatewayCloudPicksCheapest(t *testing.T) {
@@ -585,12 +590,12 @@ Expected: FAIL — `selectGateway` and `hostsModel` undefined.
 Add to `cmd/lattice-control/main.go` (near `hasCapability`):
 
 ```go
-// hostsModel reports whether a gateway serves a concrete model. An empty Models
-// list is the cloud wildcard: a subscription hosts any ":cloud" model.
+// hostsModel reports whether a local gateway serves a concrete model. An empty
+// Models list means "announces nothing" — it hosts nothing, so a LOCAL_ONLY
+// request fails closed until the gateway has announced. (Cloud is a wildcard:
+// a subscription hosts any ":cloud" model, and selectGateway skips this check
+// for cloud rather than encode the wildcard here.)
 func hostsModel(models []string, model string) bool {
-	if len(models) == 0 {
-		return true
-	}
 	for _, m := range models {
 		if m == model {
 			return true
@@ -601,8 +606,10 @@ func hostsModel(models []string, model string) bool {
 
 // selectGateway is the adequacy routing rule: filter on health (announced
 // gateways only), capability, model-hosting, and slot; then score cloud by
-// lowest cost and local by first match. It returns an error when nothing is
-// adequate, so the caller fails loudly rather than reroutes.
+// lowest cost and local by first match. Cloud gateways are wildcards — no
+// health poll, no hosting check, no slot — so their "adequacy" is cost and
+// rate-limit alone. It returns an error when nothing is adequate, so the
+// caller fails loudly rather than reroutes.
 func selectGateway(requiredCap, model string, registry map[string]Gateway, healthy map[string]bool) (Gateway, error) {
 	var best Gateway
 	bestCost := math.MaxFloat64
@@ -613,14 +620,16 @@ func selectGateway(requiredCap, model string, registry map[string]Gateway, healt
 			continue
 		}
 		isLocal := hasCapability(gw.Capabilities, "local") || hasCapability(gw.Capabilities, "tiny")
-		if isLocal && !healthy[gw.ID] {
-			continue
-		}
-		if !hostsModel(gw.Models, model) {
-			continue
-		}
-		if isLocal && gw.Slots == 0 {
-			continue
+		if isLocal {
+			if !healthy[gw.ID] {
+				continue
+			}
+			if !hostsModel(gw.Models, model) {
+				continue
+			}
+			if gw.Slots == 0 {
+				continue
+			}
 		}
 		if requiredCap == "cloud" {
 			if gw.CostPerToken < bestCost {
@@ -639,7 +648,23 @@ func selectGateway(requiredCap, model string, registry map[string]Gateway, healt
 }
 ```
 
-- [ ] **Step 4: Wire into handleRoute**
+- [ ] **Step 4: Update the existing local-routing test**
+
+`TestHandleRouteReportsLocalLocality` (in `cmd/lattice-control/route_test.go`) sets `gatewayHealthy["mac-gateway"] = true` but does not populate `Models` or `Slots`. Under the new `selectGateway`, a local gateway with empty `Models` hosts nothing and a `Slots` of zero is filtered out, so the test's expected 200 would become a 503. Update it to populate the announced fields before routing:
+
+```go
+	gateways["mac-gateway"] = Gateway{
+		ID:           "mac-gateway",
+		Endpoint:     "http://127.0.0.1:8081",
+		Capabilities: []string{"local", "chat"},
+		Models:       []string{"granite3-moe:3b"},
+		Slots:        1,
+	}
+```
+
+The `Models` value must include the concrete model that test's request resolves to, or the routing will still fail closed.
+
+- [ ] **Step 5: Wire into handleRoute**
 
 Replace the Task 2 selection block in `handleRoute` with a snapshot + `selectGateway`:
 
@@ -669,7 +694,7 @@ Replace the Task 2 selection block in `handleRoute` with a snapshot + `selectGat
 	modelName = concrete
 ```
 
-Remove the now-unused `targetID == ""` guard (696–697) if it becomes dead — `selectGateway` returns an error instead; if still reachable, leave the guard. Keep `tele.Target = targetID`, `tele.Model = modelName`, and the `Decision{...}` construction unchanged.
+Remove the now-dead `targetID == ""` guard (`if targetID == "" { ... http.Error ...; return }`, currently at lines 692–696): `selectGateway` returns an error instead of leaving `targetID` empty, so the guard is unreachable and `go vet`/the compiler will flag its now-unused `targetID` empty-path. Delete it outright. Keep `tele.Target = targetID`, `tele.Model = modelName`, and the `Decision{...}` construction unchanged.
 
 - [ ] **Step 5: Run tests, build, vet, commit**
 
@@ -709,7 +734,7 @@ type Telemetry struct {
 }
 ```
 
-In the `handleRoute` defer, add `tele.RequiredCap = requiredCap` — but `requiredCap` is declared later in the function body, so capture it in the defer via the existing pattern: set `tele.RequiredCap` where `requiredCap` is computed (after line 634), and add a field default in the defer is unnecessary. Set it right after `requiredCap, err := requiredCapability(...)`:
+Do **not** set `tele.RequiredCap` inside the `handleRoute` defer — `requiredCap` is declared after the defer closure, so the defer cannot read it. Instead, set it on the success path, immediately after `requiredCap` is computed (after the `requiredCapability(...)` call and its error check):
 
 ```go
 	tele.RequiredCap = requiredCap
