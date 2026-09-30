@@ -64,9 +64,15 @@ func TestLoadProvidersBuildsRegistryAndAnnouncement(t *testing.T) {
 	if reg.defaultProvider != "ollama" {
 		t.Errorf("default provider = %q, want ollama", reg.defaultProvider)
 	}
-	ann := reg.capabilityAnnouncement()
-	if got := ann["mlx"]; len(got) != 1 || got[0] != "qwen2.5-coder:3b" {
-		t.Errorf("mlx announcement = %v, want [qwen2.5-coder:3b]", got)
+	caps := reg.announcedCapabilities()
+	for _, want := range []string{"local", "chat", "embeddings", "tool_calling"} {
+		if !contains(caps, want) {
+			t.Errorf("announcedCapabilities missing %q: %v", want, caps)
+		}
+	}
+	models := reg.announcedModels(nil)
+	if len(models) != 1 || models[0] != "qwen2.5-coder:3b" {
+		t.Errorf("announcedModels = %v, want [qwen2.5-coder:3b]", models)
 	}
 }
 
@@ -83,5 +89,48 @@ func TestLoadProvidersUnknownKindFails(t *testing.T) {
 	}
 	if _, _, err := loadProviders(path); err == nil {
 		t.Error("unknown provider kind should fail loudly")
+	}
+}
+
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAnnouncedCapabilitiesChatOnlyForMLX(t *testing.T) {
+	reg := &providerRegistry{providerKinds: map[string]string{"mlx": "mlx"}}
+	caps := reg.announcedCapabilities()
+	if contains(caps, "embeddings") {
+		t.Fatalf("MLX-only gateway must not announce embeddings: %v", caps)
+	}
+}
+
+func TestAnnouncedCapabilitiesAddsOllamaModalities(t *testing.T) {
+	reg := &providerRegistry{providerKinds: map[string]string{"ollama": "ollama", "mlx": "mlx"}}
+	caps := reg.announcedCapabilities()
+	for _, want := range []string{"local", "chat", "embeddings", "tool_calling"} {
+		if !contains(caps, want) {
+			t.Fatalf("announcedCapabilities missing %q: %v", want, caps)
+		}
+	}
+}
+
+func TestAnnouncedModelsFlattensAndDropsCloudTags(t *testing.T) {
+	reg := &providerRegistry{
+		served: map[string][]string{"mlx": {"qwen2.5-coder:3b"}, "ollama": nil},
+	}
+	models := reg.announcedModels([]string{"granite3-moe:3b", "gemma4:31b-cloud", "qwen2.5-coder:3b"})
+	want := map[string]bool{"granite3-moe:3b": true, "qwen2.5-coder:3b": true}
+	if len(models) != len(want) {
+		t.Fatalf("got %v, want exactly %v", models, want)
+	}
+	for _, m := range models {
+		if !want[m] {
+			t.Fatalf("unexpected model %q (or cloud tag not dropped)", m)
+		}
 	}
 }

@@ -51,7 +51,8 @@ type providerRegistry struct {
 	// served lists, per provider name, the local model ids explicitly routed to
 	// it. The default provider's slice is left to mean "everything else not
 	// named", not an exhaustive inventory (that would duplicate Ollama /api/tags).
-	served map[string][]string
+	served        map[string][]string
+	providerKinds map[string]string
 }
 
 // loadProviders builds the provider map and the routing tables from the config
@@ -62,12 +63,14 @@ func loadProviders(cfgPath string) (*providerRegistry, map[string]Provider, erro
 		modelProviders:  map[string]string{},
 		modelUpstream:   map[string]string{},
 		served:          map[string][]string{},
+		providerKinds:   map[string]string{},
 	}
 	provs := map[string]Provider{}
 	ollamaURL := latticeconfig.Env("LATTICE_OLLAMA_URL", "http://localhost:11434")
 
 	if cfgPath == "" {
 		provs["ollama"] = &OllamaProvider{Endpoint: ollamaURL}
+		reg.providerKinds["ollama"] = "ollama"
 		return reg, provs, nil
 	}
 
@@ -89,6 +92,7 @@ func loadProviders(cfgPath string) (*providerRegistry, map[string]Provider, erro
 			continue
 		}
 		reg.served[p.Name] = nil
+		reg.providerKinds[p.Name] = p.Kind
 		switch p.Kind {
 		case "ollama":
 			provs[p.Name] = &OllamaProvider{Endpoint: p.Endpoint}
@@ -130,13 +134,51 @@ func resolveModel(model string) (provider, upstream string) {
 	return registry.defaultProvider, model
 }
 
-// capabilityAnnouncement is the providers field of /health: provider name to the
-// local models explicitly routed to it. The control plane reads it so it can see
-// what the gateway actually serves rather than assuming "everything via Ollama".
-func (reg *providerRegistry) capabilityAnnouncement() map[string][]string {
-	out := make(map[string][]string, len(reg.served))
-	for name, models := range reg.served {
-		out[name] = models
+// announcedCapabilities is the capability half of the /health announcement:
+// what this gateway can serve. "local" and "chat" are intrinsic to the host;
+// "embeddings" and "tool_calling" come from Ollama (MLX is chat-only).
+func (reg *providerRegistry) announcedCapabilities() []string {
+	caps := []string{"local", "chat"}
+	for _, kind := range reg.providerKinds {
+		if kind == "ollama" {
+			caps = append(caps, "embeddings", "tool_calling")
+			break
+		}
+	}
+	return caps
+}
+
+// isCloudTag reports whether a model name is an Ollama routing alias rather than
+// a local model — the ":cloud" / "<size>-cloud" suffix the measurements record
+// documents.
+func isCloudTag(name string) bool {
+	i := strings.LastIndex(name, ":")
+	if i < 0 {
+		return false
+	}
+	tag := name[i+1:]
+	return tag == "cloud" || strings.HasSuffix(tag, "-cloud")
+}
+
+// announcedModels is the flattened list of local model ids the gateway serves,
+// across all providers: every model explicitly routed in config, plus every
+// local model Ollama reports via /api/tags, cloud aliases dropped.
+func (reg *providerRegistry) announcedModels(ollamaTags []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, models := range reg.served {
+		for _, m := range models {
+			if m != "" && !seen[m] {
+				seen[m] = true
+				out = append(out, m)
+			}
+		}
+	}
+	for _, m := range ollamaTags {
+		if m != "" && !isCloudTag(m) && !seen[m] {
+			seen[m] = true
+			out = append(out, m)
+		}
 	}
 	return out
 }

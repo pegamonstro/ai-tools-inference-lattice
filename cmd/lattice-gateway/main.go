@@ -915,7 +915,6 @@ func handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	// Health check: is Ollama responsive AND is memory okay?
 	if !budgeter.CanAccommodate() {
 		http.Error(w, "Memory pressure high", http.StatusServiceUnavailable)
 		return
@@ -932,20 +931,31 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The ceiling is reported rather than configured twice: the gateway is the
-	// only process that knows what a context window costs in KV cache here, so
-	// it is the authority on the number and the control plane relays it. The
-	// providers field announces what the gateway actually serves, so the control
-	// plane discovers it instead of assuming "everything via Ollama".
-	providersField := map[string][]string{}
-	if registry != nil {
-		providersField = registry.capabilityAnnouncement()
+	var tags struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
 	}
+	_ = json.NewDecoder(resp.Body).Decode(&tags)
+	tagNames := make([]string, 0, len(tags.Models))
+	for _, m := range tags.Models {
+		tagNames = append(tagNames, m.Name)
+	}
+
+	caps := []string{"local", "chat", "embeddings", "tool_calling"}
+	models := []string{}
+	if registry != nil {
+		caps = registry.announcedCapabilities()
+		models = registry.announcedModels(tagNames)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":      "ok",
-		"max_context": maxContext,
-		"providers":   providersField,
+		"status":       "ok",
+		"max_context":  maxContext,
+		"capabilities": caps,
+		"slots":        cap(inferenceSlots),
+		"models":       models,
 	})
 }
 
