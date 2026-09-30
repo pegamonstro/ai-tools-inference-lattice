@@ -51,18 +51,38 @@ type Telemetry struct {
 	Error        string  `json:"error,omitempty"`
 }
 
-type Provider struct {
-	ID           string
-	Endpoint     string
-	Capabilities []string
-	CostPerToken float64
-	RateLimit    int // req/min
-}
-
 type Gateway struct {
 	ID           string
 	Endpoint     string
-	Capabilities []string
+	Capabilities []string // locality ("local","tiny","cloud") + modality
+	Models       []string // concrete models served; empty = wildcard (cloud)
+	Slots        int      // local concurrency ceiling (0 = not slot-limited)
+	CostPerToken float64  // cloud only
+	RateLimit    int      // cloud only, req/min
+	MaxContext   int      // announced context ceiling
+}
+
+// gatewayAnnouncement is the /health payload the gateway publishes.
+type gatewayAnnouncement struct {
+	MaxContext   int      `json:"max_context"`
+	Capabilities []string `json:"capabilities"`
+	Slots        int      `json:"slots"`
+	Models       []string `json:"models"`
+}
+
+func decodeHealth(body []byte) (gatewayAnnouncement, error) {
+	var a gatewayAnnouncement
+	err := json.Unmarshal(body, &a)
+	return a, err
+}
+
+func hasCapability(caps []string, want string) bool {
+	for _, c := range caps {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 type Task struct {
@@ -72,9 +92,9 @@ type Task struct {
 }
 
 var (
-	// Provider Registry: Now supports multiple providers for the same capability
-	providers = map[string]Provider{}
-	// Gateway Registry: For local inference
+	// gateway registry: every inference target, cloud and local, as one type.
+	// Cloud entries are declared; local entries have Models/Slots/MaxContext
+	// filled from the gateway's /health announcement.
 	gateways = map[string]Gateway{}
 )
 
@@ -82,21 +102,20 @@ func init() {
 	ollamaURL := latticeconfig.Env("LATTICE_OLLAMA_URL", "http://localhost:11434")
 	gatewayURL := latticeconfig.Env("LATTICE_GATEWAY_URL", "http://localhost:8081")
 
-	providers["ollama-cloud-primary"] = Provider{
+	gateways["ollama-cloud-primary"] = Gateway{
 		ID:           "ollama-cloud-primary",
 		Endpoint:     ollamaURL,
 		Capabilities: []string{"cloud"},
 		CostPerToken: 0.00001,
 		RateLimit:    100,
 	}
-	providers["ollama-cloud-secondary"] = Provider{
+	gateways["ollama-cloud-secondary"] = Gateway{
 		ID:           "ollama-cloud-secondary",
 		Endpoint:     ollamaURL, // Same endpoint, different account/key
 		Capabilities: []string{"cloud"},
 		CostPerToken: 0.000005,
 		RateLimit:    10,
 	}
-
 	gateways["mac-gateway"] = Gateway{
 		ID:           "mac-gateway",
 		Endpoint:     gatewayURL,
@@ -111,13 +130,16 @@ func init() {
 // The values are the same strings the registries already use in Capabilities, so
 // there is one vocabulary and no translation table to drift.
 func localityFor(targetID string) string {
-	if _, ok := gateways[targetID]; ok {
-		return "local"
+	healthMutex.RLock()
+	gw, ok := gateways[targetID]
+	healthMutex.RUnlock()
+	if !ok {
+		return "unknown"
 	}
-	if _, ok := providers[targetID]; ok {
+	if hasCapability(gw.Capabilities, "cloud") {
 		return "cloud"
 	}
-	return "unknown"
+	return "local"
 }
 
 var (
@@ -155,23 +177,27 @@ func logTelemetry(t Telemetry) {
 func monitorHealth() {
 	for {
 		for id, gw := range gateways {
+			if !hasCapability(gw.Capabilities, "local") && !hasCapability(gw.Capabilities, "tiny") {
+				continue // declared cloud: no /health, no telemetry relay
+			}
 			resp, err := http.Get(gw.Endpoint + "/health")
 			healthy := err == nil && resp != nil &&
 				(resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound)
-			if healthy && resp.StatusCode == http.StatusOK {
-				var h struct {
-					MaxContext int                 `json:"max_context"`
-					Providers  map[string][]string `json:"providers"`
-				}
-				if json.NewDecoder(resp.Body).Decode(&h) == nil {
-					healthMutex.Lock()
-					if h.MaxContext > 0 {
-						gatewayMaxContext = h.MaxContext
+			if healthy && resp != nil && resp.StatusCode == http.StatusOK {
+				body, rerr := io.ReadAll(resp.Body)
+				if rerr == nil {
+					if a, derr := decodeHealth(body); derr == nil {
+						healthMutex.Lock()
+						g2 := gateways[id]
+						g2.Models = a.Models
+						g2.Slots = a.Slots
+						g2.MaxContext = a.MaxContext
+						if len(a.Capabilities) > 0 {
+							g2.Capabilities = a.Capabilities
+						}
+						gateways[id] = g2
+						healthMutex.Unlock()
 					}
-					if h.Providers != nil {
-						gatewayProviders = h.Providers
-					}
-					healthMutex.Unlock()
 				}
 			}
 			if resp != nil {
@@ -195,17 +221,6 @@ var (
 	gatewayTelemetrySeq  int64
 	gatewayTelemetryBoot string
 	gatewayRelayKnown    bool
-
-	// gatewayMaxContext is what the gateway reports it will honour, refreshed on
-	// each health poll. It is advertised by /capabilities so the limit is
-	// discoverable rather than invisible.
-	gatewayMaxContext int
-
-	// gatewayProviders is the gateway's capability announcement, refreshed on each
-	// health poll: provider name to the local models explicitly routed to it. It
-	// lets the control plane see what the gateway actually serves rather than
-	// assuming "everything via Ollama".
-	gatewayProviders map[string][]string
 )
 
 func gatewayRelayPath() string {
@@ -564,8 +579,16 @@ func requiredCapability(privacy, latencyClass, model string) (string, error) {
 // when the only route was the chat endpoint.
 func handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	healthMutex.RLock()
-	ctxCap := gatewayMaxContext
-	providers := gatewayProviders
+	ctxCap := 0
+	var models []string
+	var caps []string
+	slots := 0
+	if gw, ok := gateways["mac-gateway"]; ok {
+		ctxCap = gw.MaxContext
+		models = gw.Models
+		caps = gw.Capabilities
+		slots = gw.Slots
+	}
 	healthMutex.RUnlock()
 
 	ids := make([]string, 0, len(capabilities))
@@ -585,9 +608,13 @@ func handleCapabilities(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"context_length":    ctxCap,
-		"capabilities":      list,
-		"gateway_providers": providers,
+		"context_length": ctxCap,
+		"capabilities":   list,
+		"gateway": map[string]interface{}{
+			"capabilities": caps,
+			"slots":        slots,
+			"models":       models,
+		},
 	})
 }
 
@@ -626,10 +653,6 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("Routing Request [%s]: Model=%s, Privacy=%s, Latency=%s\n",
 		req.Routing.RequestID, req.Model, req.Routing.Privacy, req.Routing.LatencyClass)
 
-	healthMutex.RLock()
-	healthy := gatewayHealthy
-	healthMutex.RUnlock()
-
 	// 1. Determine Target Capability
 	requiredCap, err := requiredCapability(req.Routing.Privacy, req.Routing.LatencyClass, req.Model)
 	if err != nil {
@@ -641,48 +664,33 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 	// 2. Routing Logic
 	var targetID, endpoint, modelName string
 
+	healthMutex.RLock()
+	healthy := make(map[string]bool, len(gatewayHealthy))
+	for k, v := range gatewayHealthy {
+		healthy[k] = v
+	}
+	healthMutex.RUnlock()
+
 	if requiredCap == "cloud" {
-		// Find the cheapest provider that supports the "cloud" capability.
-		var bestProvider Provider
-		found := false
-		minCost := math.MaxFloat64
-
-		for _, p := range providers {
-			for _, cap := range p.Capabilities {
-				if cap == "cloud" && p.CostPerToken < minCost {
-					minCost = p.CostPerToken
-					bestProvider = p
-					found = true
-				}
-			}
-		}
-
-		if found {
-			targetID = bestProvider.ID
-			endpoint = bestProvider.Endpoint
-			modelName = resolveModel(req.Model, "cloud")
-		}
-	} else {
-		// Find a healthy gateway for 'local' or 'tiny'
-		found := false
+		bestCost := math.MaxFloat64
 		for id, gw := range gateways {
-			if healthy[id] {
-				for _, cap := range gw.Capabilities {
-					if cap == "local" || (requiredCap == "local" && cap == "tiny") {
-						targetID = id
-						endpoint = gw.Endpoint
-						modelName = resolveModel(req.Model, "local")
-						found = true
-						break
-					}
-				}
+			if hasCapability(gw.Capabilities, "cloud") && gw.CostPerToken < bestCost {
+				bestCost = gw.CostPerToken
+				targetID = id
+				endpoint = gw.Endpoint
 			}
-			if found {
+		}
+		modelName = resolveModel(req.Model, "cloud")
+	} else {
+		for id, gw := range gateways {
+			if hasCapability(gw.Capabilities, "local") && healthy[id] {
+				targetID = id
+				endpoint = gw.Endpoint
+				modelName = resolveModel(req.Model, "local")
 				break
 			}
 		}
-
-		if !found {
+		if targetID == "" {
 			tele.Error = "No healthy local gateway found"
 			http.Error(w, "No healthy local gateway found", http.StatusServiceUnavailable)
 			return

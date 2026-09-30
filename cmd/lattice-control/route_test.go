@@ -227,8 +227,17 @@ func TestLocalOnlyRefusesACloudModelRatherThanPromotingIt(t *testing.T) {
 
 func TestHandleCapabilitiesIsSortedAndReportsTheCeiling(t *testing.T) {
 	healthMutex.Lock()
-	gatewayMaxContext = 65536
+	gw := gateways["mac-gateway"]
+	gw.MaxContext = 65536
+	gateways["mac-gateway"] = gw
 	healthMutex.Unlock()
+	defer func() {
+		healthMutex.Lock()
+		gw := gateways["mac-gateway"]
+		gw.MaxContext = 0
+		gateways["mac-gateway"] = gw
+		healthMutex.Unlock()
+	}()
 
 	rec := httptest.NewRecorder()
 	handleCapabilities(rec, httptest.NewRequest("GET", "/capabilities", nil))
