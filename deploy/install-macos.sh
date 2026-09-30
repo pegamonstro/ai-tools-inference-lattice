@@ -103,3 +103,43 @@ if [[ -x "$MLX_SERVER" ]]; then
 else
   echo "note: mlx server not found at $MLX_SERVER — skipping the mlx agent."
 fi
+
+# The MFLUX sidecar — the local image-generation backend for the Hermes "mflux"
+# image_gen plugin. It is optional and, like the MLX server, only supervised when
+# its venv (a username-path that must not be committed) is present. The sidecar is
+# not a gateway provider: image generation is a different modality from the
+# chat/embeddings surface the gateway speaks.
+MFLUX_LABEL="com.lattice.mflux"
+MFLUX_TEMPLATE="$REPO_ROOT/deploy/$MFLUX_LABEL.plist.in"
+MFLUX_PYTHON="$HOME/lattice-mflux/venv/bin/python"
+# The 4-bit model baked by `mflux-save --model dev --quantize 4` (see the spec).
+# It is the username-path that must not be committed, like the venv above.
+MFLUX_MODEL="$HOME/lattice-mflux/models/flux-dev-4bit"
+MFLUX_DEST="$HOME/Library/LaunchAgents/$MFLUX_LABEL.plist"
+
+if [[ -x "$MFLUX_PYTHON" ]]; then
+  launchctl bootout "$DOMAIN/$MFLUX_LABEL" 2>/dev/null || true
+  busy="$(lsof -nP -iTCP:8899 -sTCP:LISTEN -t 2>/dev/null || true)"
+  if [[ -n "$busy" ]]; then
+    for pid in $busy; do
+      if [[ "$(ps -o command= -p "$pid" 2>/dev/null)" == *mflux-sidecar.py* ]]; then
+        echo "error: an unmanaged mflux sidecar (pid $pid) is holding :8899." >&2
+        echo "stop it, then re-run this script:" >&2
+        echo "  kill $pid" >&2
+        exit 1
+      fi
+    done
+  fi
+  sed -e "s|__MFLUX_PYTHON__|$MFLUX_PYTHON|g" -e "s|__MFLUX_MODEL__|$MFLUX_MODEL|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
+    "$MFLUX_TEMPLATE" >"$MFLUX_DEST"
+  launchctl bootstrap "$DOMAIN" "$MFLUX_DEST"
+  if launchctl print "$DOMAIN/$MFLUX_LABEL" >/dev/null 2>&1; then
+    echo "installed: $MFLUX_DEST"
+    echo "running  : $DOMAIN/$MFLUX_LABEL"
+    echo "logs     : $LOG_DIR/lattice-mflux.{out,err}.log"
+  else
+    echo "warning: mflux bootstrap failed — check $LOG_DIR/lattice-mflux.err.log" >&2
+  fi
+else
+  echo "note: mflux venv not found at $MFLUX_PYTHON — skipping the mflux sidecar."
+fi

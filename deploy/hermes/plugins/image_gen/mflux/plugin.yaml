@@ -1,0 +1,6 @@
+name: mflux
+version: 1.0.0
+description: "Local uncensored image generation and editing (FLUX.1-dev + Lustly.ai uncensored LoRA) via an MLX sidecar on the Mac."
+author: pegamonstro
+kind: backend
+requires_env: []

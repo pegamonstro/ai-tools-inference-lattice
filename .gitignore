@@ -7,5 +7,9 @@
 /lattice-stats
 *.jsonl
 *.py
+# Deployment artifacts are Python but must ship: the mflux image-gen sidecar and
+# the Hermes image_gen plugin are the repo's source of truth (see the spec).
+!deploy/mflux-sidecar.py
+!deploy/hermes/plugins/image_gen/mflux/__init__.py
 /bin/
 /deploy/*.env

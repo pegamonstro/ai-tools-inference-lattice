@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lattice MFLUX sidecar — macOS LaunchAgent template.
+
+  The local image-generation backend for the Hermes "mflux" image_gen plugin. It is
+  supervised here because it runs on the Mac (the only MLX + RAM host), and it is a
+  sidecar rather than a gateway provider because image generation is a different
+  modality from the OpenAI chat/embeddings surface the gateway speaks. See
+  docs/specs/lattice-image-generation.md.
+
+  install-macos.sh substitutes the placeholders and installs the result to
+  ~/Library/LaunchAgents/, the same username-free substitution step as the gateway
+  and mlx agents. MFLUX_MODEL points at the baked 4-bit model (mflux-save output,
+  see the spec), so MFLUX_QUANTIZE is empty and MFLUX_EXTRA_ARGS carries the
+  --base-model / --no-bake-lora / --low-ram flags the bake requires. MFLUX_BIND
+  must be 0.0.0.0 so the Pi can reach it over the tailnet; the sidecar is
+  unauthenticated (see the spec §Security).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lattice.mflux</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__MFLUX_PYTHON__</string>
+        <string>__REPO_ROOT__/deploy/mflux-sidecar.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MFLUX_MODEL</key>
+        <string>__MFLUX_MODEL__</string>
+        <key>MFLUX_LORA</key>
+        <string>shauray/flux-uncensored-lora</string>
+        <key>MFLUX_LORA_SCALE</key>
+        <string>1.0</string>
+        <key>MFLUX_QUANTIZE</key>
+        <string></string>
+        <key>MFLUX_BIND</key>
+        <string>0.0.0.0</string>
+        <key>MFLUX_PORT</key>
+        <string>8899</string>
+        <key>MFLUX_EXTRA_ARGS</key>
+        <string>--base-model dev --no-bake-lora --low-ram</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/lattice-mflux.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/lattice-mflux.err.log</string>
+</dict>
+</plist>
