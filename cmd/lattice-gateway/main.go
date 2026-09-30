@@ -936,7 +936,10 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 			Name string `json:"name"`
 		} `json:"models"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&tags)
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		http.Error(w, "Ollama unhealthy", http.StatusServiceUnavailable)
+		return
+	}
 	tagNames := make([]string, 0, len(tags.Models))
 	for _, m := range tags.Models {
 		tagNames = append(tagNames, m.Name)
