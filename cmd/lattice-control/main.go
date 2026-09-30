@@ -48,6 +48,7 @@ type Telemetry struct {
 	Privacy      string  `json:"privacy"`
 	LatencyClass string  `json:"latency_class"`
 	Locality     string  `json:"locality"`
+	RequiredCap  string  `json:"required_cap,omitempty"`
 	Error        string  `json:"error,omitempty"`
 }
 
@@ -717,6 +718,8 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+
+	tele.RequiredCap = requiredCap
 
 	// 2. Routing Logic
 	healthMutex.RLock()
