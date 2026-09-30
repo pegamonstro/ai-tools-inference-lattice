@@ -23,24 +23,30 @@ latency_class, model)` — evaluated in this priority order:
    cloud cannot be served by the Mac at all, so naming one is a request for the
    cloud even when the client sends no routing fields. See §2.1.
 2. **Privacy** (hard):
-   - `LOCAL_ONLY` → local. If no Mac gateway is healthy → `503 Service
-     Unavailable` (fail closed).
+   - `LOCAL_ONLY` → local.
 3. **Latency class** (a preference, and the only input with a default):
    - `interactive` → cloud.
    - anything else, including absent → local.
 
-Then the target is resolved:
+That yields a required capability — `"local"` or `"cloud"` — which `selectGateway`
+resolves to a concrete target against the **unified gateway registry** (§3). The
+rule is *filter then score*:
 
-- **Cloud**: the cheapest provider advertising the `cloud` capability wins
-  (`CostPerToken`), so adding a cheaper cloud provider takes the traffic without
-  a code change.
-- **Local**: the first healthy gateway advertising `local`.
+- **Filter on capability.** A gateway must advertise the required capability.
+- **Local adequacy** (for `"local"` / `"tiny"`): the gateway must be healthy,
+  host the resolved model, and have a free slot — all three, or it is skipped.
+- **Score.** Cloud: the cheapest adequate gateway wins (`CostPerToken`), so
+  adding a cheaper cloud gateway takes the traffic without a code change. Local:
+  the first adequate gateway wins.
+
+The result is a `Decision` — `target`, `endpoint`, `model_name`, `locality` —
+which the frontend reads and proxies the actual inference to.
 
 **There is no fallback from local to cloud.** A request that decided `local` and
-finds no healthy gateway returns `503 No healthy local gateway found`; it is
-never quietly re-routed to the cloud. Earlier drafts of this section described a
-fallback — that was never implemented, and implementing it is what `LOCAL_ONLY`
-exists to prevent.
+finds no adequate gateway returns `503 no adequate gateway for capability
+"local" model "…"`; it is never quietly re-routed to the cloud. Earlier drafts of
+this section described a fallback — that was never implemented, and implementing
+it is what `LOCAL_ONLY` exists to prevent.
 
 **Concurrency is not gated.** §4 describes a cap that does not hold; see the note
 there.
@@ -55,7 +61,7 @@ after the **last** `:` is either `cloud` or `<size>-cloud`.
 | `deepseek-v4.1-flash:cloud` | yes |
 | `nemotron-3-nano:30b-cloud` | yes |
 | `namespace/gpt-oss:120b-cloud` | yes |
-| `granite4:3b`, `hermes3:8b` | no |
+| `granite3-moe:3b`, `qwen2.5-coder:3b` | no |
 | `local-brain` (a capability alias) | no |
 | `mystery-cloud`, `foo:cloudy` (no tag / wrong tag) | no |
 
@@ -83,20 +89,21 @@ This subsection reports the **target's** class, as distinct from §2.1, which
 decides the **model's**: a cloud-tagged model sent to the cloud yields a target
 whose `locality` is `cloud`, and the same tag never produces a local target.
 
-`locality` — `local` | `cloud` | `unknown` — is derived from the registry the
-target was chosen from (`gateways` → local, `providers` → cloud) and reported on
-both the decision and the telemetry line. It sits beside `target`, which stays the
-source of truth. Refusals and fail-closed decisions name no target and therefore
-report `unknown`. The values are the same strings the registry entries already use
-in `Capabilities`, so there is no translation table between them. See
+`locality` — `local` | `cloud` | `unknown` — is derived from the target's
+capabilities: a target advertising `cloud` reports `cloud`, everything else
+reports `local`. It is reported on both the decision and the telemetry line. It
+sits beside `target`, which stays the source of truth. Refusals and fail-closed
+decisions name no target and therefore report `unknown`. The values are the same
+strings the registry entries already use in `Capabilities`, so there is no
+translation table between them. See
 [lattice-locality-and-embeddings.md](lattice-locality-and-embeddings.md) §3.
 
 ## 3. Capability Registry
 
 A map of model *aliases* (capabilities) to their local and cloud model names:
 
-- `local-brain` $\rightarrow$ `{local: granite4:3b, cloud: gemma4:31b-cloud}`
-- `local-coder` $\rightarrow$ `{local: hermes3:8b, cloud: deepseek-v4-pro:cloud}`
+- `local-brain` $\rightarrow$ `{local: granite3-moe:3b, cloud: gemma4:31b-cloud}`
+- `local-coder` $\rightarrow$ `{local: qwen2.5-coder:3b, cloud: deepseek-v4-pro:cloud}`
 
 The alias selects a capability (brain vs coder); the routing decision then picks
 the local or cloud model name for that capability.
@@ -126,29 +133,37 @@ fails — it is that it failed with nothing naming it.
 ### 3.2 `GET /capabilities`
 
 Control serves the client-facing namespace — the capability aliases, sorted by
-id — together with the context ceiling the gateway will honour:
+id — together with the context ceiling the gateway will honour and the gateway's
+own announcement:
 
 ```json
 {
   "context_length": 32768,
   "capabilities": [
-    { "id": "local-brain", "local": "granite4:3b", "cloud": "gemma4:31b-cloud" },
-    { "id": "local-coder", "local": "hermes3:8b", "cloud": "deepseek-v4-pro:cloud" }
-  ]
+    { "id": "local-brain", "local": "granite3-moe:3b", "cloud": "gemma4:31b-cloud" },
+    { "id": "local-coder", "local": "qwen2.5-coder:3b", "cloud": "deepseek-v4-pro:cloud" }
+  ],
+  "gateway": {
+    "capabilities": ["local", "chat", "embeddings", "tool_calling"],
+    "slots": 1,
+    "models": ["granite3-moe:3b", "qwen2.5-coder:3b"]
+  }
 }
 ```
 
 The frontend reads this to build `GET /v1/models`
 ([`lattice-frontend.md`](lattice-frontend.md) §2.2), so the gateway's real
-ceiling is discoverable rather than invisible.
+ceiling and the models it hosts are discoverable rather than invisible. The
+`gateway` object is the `mac-gateway` entry's announcement (`capabilities`,
+`slots`, `models`), relayed from `/health`.
 
 ### 3.3 Gateway context ceiling
 
-Control stores `gatewayMaxContext`: the ceiling the gateway advertises. It is
+Control stores the ceiling on the gateway's registry entry (`MaxContext`). It is
 refreshed on each 10-second health poll from the gateway's `/health` payload
 (`max_context`), because the gateway — not Control — is the authority on what a
 context window costs in KV cache on that hardware
-([`lattice-gateway.md`](lattice-gateway.md) §3.2). `gatewayMaxContext` is what
+([`lattice-gateway.md`](lattice-gateway.md) §3.2). That ceiling is what
 `GET /capabilities` reports as `context_length`.
 
 ## 4. Concurrency Management

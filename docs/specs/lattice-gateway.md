@@ -17,7 +17,7 @@ The Lattice Gateway is the execution arm for all local inference. It translates 
 The Mac has 16GB of unified memory. Running multiple LLMs or very large contexts can trigger swap.
 
 **The "No-Swap" Guard**:
-- **Resident Model Set**: The Gateway should ideally pin a set of common models (e.g., `granite4:3b` as main) to avoid constant unloading/reloading (the `OLLAMA_MAX_LOADED_MODELS=1` issue).
+- **Resident Model Set**: The Gateway should ideally pin a set of common models (e.g., `granite3-moe:3b` as main) to avoid constant unloading/reloading (the `OLLAMA_MAX_LOADED_MODELS=1` issue).
 - **Concurrency Limit**: Maintain a hard limit on concurrent local requests based on the active model's memory footprint.
 - **Pressure Signal**: If the system reports high memory pressure (or if the calculated memory usage of active requests exceeds a threshold), the Gateway must:
   - Queue new requests.
@@ -61,12 +61,18 @@ translates Ollama's reply back into OpenAI's shape:
 > is available on the unary path only, so a tool-calling client must not set
 > `stream: true`. This is a deliberate non-goal, not a defect.
 
-### 3.2 Health and the context ceiling
+### 3.2 Health and the announcement
 
 `GET /health` returns JSON:
 
 ```json
-{ "status": "ok", "max_context": 32768 }
+{
+  "status": "ok",
+  "max_context": 32768,
+  "capabilities": ["local", "chat", "embeddings", "tool_calling"],
+  "slots": 1,
+  "models": ["granite3-moe:3b", "qwen2.5-coder:3b"]
+}
 ```
 
 `max_context` is the ceiling the gateway will honour
@@ -76,6 +82,19 @@ window costs in KV cache on this hardware, so it is the authority on the number
 and the Control plane relays it — from here into `GET /capabilities`
 ([`lattice-control.md`](lattice-control.md) §3.3). A prompt that would need more
 than this ceiling is sized down to it.
+
+The rest of the payload is the **announcement** the Control plane uses to decide
+whether a request can be served locally at all:
+
+- **`capabilities`** — what this gateway can serve. `"local"` and `"chat"` are
+  intrinsic to the host; `"embeddings"` and `"tool_calling"` are added when any
+  provider is Ollama (MLX is chat-only).
+- **`slots`** — the single local-inference slot (always `1`), the concurrency
+  ceiling the Control plane's adequacy filter reads.
+- **`models`** — the flattened list of local model ids the gateway serves: every
+  model explicitly routed in the provider config, plus every local model Ollama
+  reports via `/api/tags`, with the `:cloud` / `<size>-cloud` routing aliases
+  dropped (those are cloud, not local).
 
 ### 3.3 Concurrency, cancellation, and the inference timeout
 

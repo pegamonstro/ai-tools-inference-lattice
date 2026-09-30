@@ -178,10 +178,13 @@ at all: if the MLX server is down the request fails with `500 mlx returned
 status …`, and a model mapped to an unregistered provider fails with
 `500 No provider registered`. Nothing is silently re-homed to Ollama.
 
-The gateway announces what it serves in `/health` (`providers`), which the
-control plane stores and surfaces in `/capabilities` (`gateway_providers`).
-The single local inference slot still serialises *all* local models, Ollama
-and MLX alike — one resident model at a time, unchanged.
+The gateway announces what it serves in `/health` — `capabilities`, `slots`,
+and `models` — which the control plane stores on its registry entry and
+surfaces in `/capabilities` under `gateway`. The `models` list is the flattened
+set of local model ids: every model routed in the config, plus every local
+model Ollama reports via `/api/tags`, with `:cloud` aliases dropped. The single
+local inference slot still serialises *all* local models, Ollama and MLX alike
+— one resident model at a time, unchanged.
 
 ---
 
@@ -434,7 +437,7 @@ vm_stat | grep -i swap          # Swapouts is the wear-relevant counter
 
 | symptom | cause | fix |
 |---|---|---|
-| `503 No healthy local gateway found` | gateway down, or the Pi's 10s health loop hasn't re-probed it yet | the unit restarts it; wait ~10s; check `/status` |
+| `503 no adequate gateway for capability "local" model "…"` | no healthy gateway hosts the model, or the single slot is busy — the Pi's 10s health loop may not have re-probed yet | the unit restarts it; wait ~10s; check `/status` |
 | `429 Memory pressure` | free RAM below the margin | close memory hogs on the Mac, or lower the context window |
 | `500 context deadline exceeded` on a local request | the Ollama bound elapsed before the answer finished — a genuinely slow request (large prompt, or many output tokens), not a hang | raise `LATTICE_GATEWAY_OLLAMA_TIMEOUT` (see §3.1); compare the prompt size against the `32768` ceiling |
 | `500 ollama returned status 404` | model id not pulled / not present in Ollama | `ollama pull <model>`, verify the capability map |
