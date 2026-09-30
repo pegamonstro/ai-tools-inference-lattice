@@ -310,7 +310,7 @@ func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, e
 		"tools":    req.Tools,
 		"stream":   false,
 		"options": map[string]interface{}{
-			"num_ctx":       contextWindow(req.Messages, maxTokens, req.Routing.ProviderParams),
+			"num_ctx":       contextWindow(req.Model, req.Messages, maxTokens, req.Routing.ProviderParams),
 			"num_predict":   maxTokens,
 			"kv_cache_type": kvCacheType,
 		},
@@ -422,7 +422,7 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 		"tools":    req.Tools,
 		"stream":   true,
 		"options": map[string]interface{}{
-			"num_ctx":       contextWindow(req.Messages, maxTokens, req.Routing.ProviderParams),
+			"num_ctx":       contextWindow(req.Model, req.Messages, maxTokens, req.Routing.ProviderParams),
 			"num_predict":   maxTokens,
 			"kv_cache_type": kvCacheType,
 		},
@@ -636,23 +636,15 @@ func resolveMaxTokens(req Request) int {
 }
 
 // contextWindow sizes the Ollama context to the prompt: it starts at 2048 and
-// doubles until it fits the prompt + output + margin, capped at maxContext.
-// reasoning_effort=low lowers that cap to 4096; every other value, including the
-// default, uses the full cap, so "high" lets an agent reason over more tokens
-// without forcing every request to pay for them.
-func contextWindow(messages []interface{}, maxTokens int, providerParams map[string]interface{}) int {
-	// Default ceiling is the configured max (32768 — the 65536 raise was measured
-	// and rejected; see above): large agent prompts must be allowed to grow,
-	// otherwise Ollama truncates them. reasoning_effort=low is the only knob that
-	// deliberately restricts it (for memory-sensitive calls).
-	ceiling := maxContext
-	if re, ok := providerParams["reasoning_effort"].(string); ok {
-		switch re {
-		case "low":
-			ceiling = 4096
-		case "high":
-			ceiling = maxContext
-		}
+// doubles until it fits the prompt + output + margin, capped at the model's
+// ceiling. The ceiling is per-model (modelContextCeiling): a linear-attention
+// model may be granted 64K+ in config while dense locals stay at the global
+// default. reasoning_effort=low lowers the cap to 4096; every other value,
+// including the default, uses the full per-model ceiling.
+func contextWindow(model string, messages []interface{}, maxTokens int, providerParams map[string]interface{}) int {
+	ceiling := modelContextCeiling(model)
+	if re, ok := providerParams["reasoning_effort"].(string); ok && re == "low" {
+		ceiling = 4096
 	}
 
 	needed := estimateTokens(messages) + maxTokens + 256 // +margin for framing/overhead
@@ -663,9 +655,6 @@ func contextWindow(messages []interface{}, maxTokens int, providerParams map[str
 	}
 	if ctx > ceiling {
 		ctx = ceiling
-	}
-	if ctx > maxContext {
-		ctx = maxContext
 	}
 	return ctx
 }
@@ -727,7 +716,7 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 
 	t0 := time.Now()
 	maxTokens := resolveMaxTokens(req)
-	ctxWindow := contextWindow(req.Messages, maxTokens, req.Routing.ProviderParams)
+	ctxWindow := contextWindow(req.Model, req.Messages, maxTokens, req.Routing.ProviderParams)
 
 	fmt.Printf("Gateway executing request [%s] for model %s\n", req.Routing.RequestID, req.Model)
 

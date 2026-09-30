@@ -39,6 +39,10 @@ type modelRoute struct {
 	Name     string `json:"name"`
 	Provider string `json:"provider"`
 	Upstream string `json:"upstream"`
+	// Context is an optional per-model ceiling on the context window, overriding
+	// the global default. A linear-attention model (LFM2.5) can afford 64K where
+	// a dense local model cannot; only the models that can are given the raise.
+	Context int `json:"context"`
 }
 
 // providerRegistry holds the routing tables resolveModel and the /health
@@ -48,6 +52,7 @@ type providerRegistry struct {
 	defaultProvider string
 	modelProviders  map[string]string
 	modelUpstream   map[string]string
+	modelContexts   map[string]int
 	// served lists, per provider name, the local model ids explicitly routed to
 	// it. The default provider's slice is left to mean "everything else not
 	// named", not an exhaustive inventory (that would duplicate Ollama /api/tags).
@@ -62,6 +67,7 @@ func loadProviders(cfgPath string) (*providerRegistry, map[string]Provider, erro
 		defaultProvider: "ollama",
 		modelProviders:  map[string]string{},
 		modelUpstream:   map[string]string{},
+		modelContexts:   map[string]int{},
 		served:          map[string][]string{},
 		providerKinds:   map[string]string{},
 	}
@@ -111,6 +117,9 @@ func loadProviders(cfgPath string) (*providerRegistry, map[string]Provider, erro
 		if m.Upstream != "" {
 			reg.modelUpstream[m.Name] = m.Upstream
 		}
+		if m.Context > 0 {
+			reg.modelContexts[m.Name] = m.Context
+		}
 		reg.served[m.Provider] = append(reg.served[m.Provider], m.Name)
 	}
 
@@ -132,6 +141,20 @@ func resolveModel(model string) (provider, upstream string) {
 		return p, u
 	}
 	return registry.defaultProvider, model
+}
+
+// modelContextCeiling returns the context ceiling a model may load at: an
+// explicit per-model override from config, or the global default otherwise. The
+// override lets a linear-attention model (LFM2.5) afford 64K+ where a dense
+// local model cannot, without raising the global ceiling that keeps the dense
+// ones out of swap.
+func modelContextCeiling(model string) int {
+	if registry != nil {
+		if c, ok := registry.modelContexts[model]; ok && c > 0 {
+			return c
+		}
+	}
+	return maxContext
 }
 
 // announcedCapabilities is the capability half of the /health announcement:
