@@ -18,6 +18,14 @@ DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG_DIR="$HOME/Library/Logs/lattice"
 DOMAIN="gui/$UID"
 
+# The optional MLX server — a second local runtime behind the gateway. Its venv
+# lives outside the repo (a username-path that must not be committed), and it is
+# only supervised when that venv is present.
+MLX_LABEL="com.lattice.mlx"
+MLX_TEMPLATE="$REPO_ROOT/deploy/$MLX_LABEL.plist.in"
+MLX_SERVER="$HOME/lattice-mlx/venv/bin/mlx_lm.server"
+MLX_DEST="$HOME/Library/LaunchAgents/$MLX_LABEL.plist"
+
 if [[ ! -x "$BIN" ]]; then
   echo "error: $BIN is missing or not executable." >&2
   echo "build it first:" >&2
@@ -64,4 +72,34 @@ if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
 else
   echo "error: bootstrap failed — check $LOG_DIR/lattice-gateway.err.log" >&2
   exit 1
+fi
+
+# The MLX server is optional: without its venv the gateway still runs, and an
+# MLX-routed model fails loudly at request time. Only supervise it when present,
+# and refuse to fight an unmanaged mlx-lm server already holding :8080.
+if [[ -x "$MLX_SERVER" ]]; then
+  launchctl bootout "$DOMAIN/$MLX_LABEL" 2>/dev/null || true
+  busy="$(lsof -nP -iTCP:8080 -sTCP:LISTEN -t 2>/dev/null || true)"
+  if [[ -n "$busy" ]]; then
+    for pid in $busy; do
+      if [[ "$(ps -o command= -p "$pid" 2>/dev/null)" == *mlx_lm.server* ]]; then
+        echo "error: an unmanaged mlx-lm server (pid $pid) is holding :8080." >&2
+        echo "stop it, then re-run this script:" >&2
+        echo "  kill $pid" >&2
+        exit 1
+      fi
+    done
+  fi
+  sed -e "s|__MLX_SERVER__|$MLX_SERVER|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
+    "$MLX_TEMPLATE" >"$MLX_DEST"
+  launchctl bootstrap "$DOMAIN" "$MLX_DEST"
+  if launchctl print "$DOMAIN/$MLX_LABEL" >/dev/null 2>&1; then
+    echo "installed: $MLX_DEST"
+    echo "running  : $DOMAIN/$MLX_LABEL"
+    echo "logs     : $LOG_DIR/lattice-mlx.{out,err}.log"
+  else
+    echo "warning: mlx bootstrap failed — check $LOG_DIR/lattice-mlx.err.log" >&2
+  fi
+else
+  echo "note: mlx server not found at $MLX_SERVER — skipping the mlx agent."
 fi

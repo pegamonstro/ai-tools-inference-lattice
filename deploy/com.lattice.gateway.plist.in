@@ -30,6 +30,12 @@
     <key>WorkingDirectory</key>
     <string>__REPO_ROOT__</string>
 
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LATTICE_GATEWAY_PROVIDERS</key>
+        <string>__REPO_ROOT__/deploy/gateway-providers.json</string>
+    </dict>
+
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

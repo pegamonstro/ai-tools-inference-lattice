@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lattice MLX server — macOS LaunchAgent template.
+
+  The mlx-lm OpenAI-compatible server that backs the gateway's "mlx" provider.
+  install-macos.sh substitutes the two placeholders and installs the result to
+  ~/Library/LaunchAgents/, the same username-free substitution step as the
+  gateway agent (launchd cannot expand shell variables, and a literal
+  /Users/<name>/... path would put a username in a public repo).
+
+  --model must match the "upstream" the gateway config pins for the MLX-routed
+  model (deploy/gateway-providers.json): mlx-lm serves one model per process.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lattice.mlx</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__MLX_SERVER__</string>
+        <string>--model</string>
+        <string>mlx-community/Qwen2.5-Coder-3B-Instruct-4bit</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>8080</string>
+        <string>--max-tokens</string>
+        <string>4096</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/lattice-mlx.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/lattice-mlx.err.log</string>
+</dict>
+</plist>
