@@ -91,6 +91,7 @@ source. Defaults are shown; override in each process's environment (see §5).
 | `LATTICE_GATEWAY_KV_CACHE` | `q8_0` | KV cache quantisation |
 | `LATTICE_GATEWAY_MEMORY_MARGIN_MB` | `1536` | free RAM the gateway refuses to cross (see §7) |
 | `LATTICE_GATEWAY_OLLAMA_TIMEOUT` | `20m` | Go duration bounding one call to Ollama (see §3.1) |
+| `LATTICE_GATEWAY_PROVIDERS` | *(unset)* | path to a JSON file naming the providers and model→provider routes (see §3.2) |
 | `LATTICE_GATEWAY_TELEMETRY` | `telemetry-gateway.jsonl` | gateway's local event buffer sink (CWD-relative) |
 
 #### 3.1 The inference timeout
@@ -133,6 +134,54 @@ fires on a stalled server but never cuts a long answer short.
 > the queue — so a long bound no longer risks pinning the gateway's single
 > inference slot. A client that goes away *while queued for the slot* is recorded
 > in gateway telemetry as `client_cancelled_while_queued`.
+
+#### 3.2 The MLX provider
+
+The gateway can serve a model through a second local engine, **MLX** (Apple's
+framework, ~43 % faster decode than llama.cpp on the M1 — see
+[`docs/measurements.md`](../measurements.md)). Enabling it is opt-in and
+config-driven; with no config file the gateway behaves exactly as it always
+has, every model served by Ollama.
+
+Point `LATTICE_GATEWAY_PROVIDERS` at a JSON file:
+
+```json
+{
+  "default_provider": "ollama",
+  "providers": [
+    { "name": "ollama", "kind": "ollama", "endpoint": "http://localhost:11434" },
+    { "name": "mlx",    "kind": "mlx",    "endpoint": "http://localhost:8080" }
+  ],
+  "models": [
+    { "name": "qwen2.5-coder:3b", "provider": "mlx",
+      "upstream": "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit" }
+  ]
+}
+```
+
+- `default_provider` serves any model not listed in `models`, name passed
+  through unchanged.
+- `providers[].kind` is `ollama` or `mlx`; `endpoint` is the base URL.
+- `models[]` pins a local alias to a provider, and `upstream` renames it for
+  that engine — MLX names a model by its Hugging Face repo, not by an Ollama
+  tag.
+
+**The MLX provider is a client, not a server.** It POSTs OpenAI chat
+completions to an `mlx-lm` server you must run yourself on the Mac
+(`mlx_lm.server --model mlx-community/Qwen2.5-Coder-3B-Instruct-4bit
+--port 8080`), started with the same model id the config's `upstream` names.
+It is **chat-only**: no tool-call translation, no embeddings, no `num_ctx`
+control — mlx-lm sets its own context at server load.
+
+**Fail-loudly, not fall-back.** A model mapped to MLX is served by MLX or not
+at all: if the MLX server is down the request fails with `500 mlx returned
+status …`, and a model mapped to an unregistered provider fails with
+`500 No provider registered`. Nothing is silently re-homed to Ollama.
+
+The gateway announces what it serves in `/health` (`providers`), which the
+control plane stores and surfaces in `/capabilities` (`gateway_providers`).
+The single local inference slot still serialises *all* local models, Ollama
+and MLX alike — one resident model at a time, unchanged.
 
 ---
 
