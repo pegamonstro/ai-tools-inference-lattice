@@ -44,9 +44,10 @@ same resident memory (~1.9 GB), no swap movement. The win is a runtime
 property — decode is memory-bandwidth-bound, and MLX's memory path is tighter.
 
 **The catch:** MLX serves one request at a time (no continuous batching) and
-is a Python library, not a bundled server — using it means running an MLX
-process on the Mac *alongside* Ollama. On 16 GB that is two resident runtimes;
-on 32 GB it is comfortable.
+is a Python library, not a bundled server. In the agreed split — Ollama for
+cloud (RPi4), MLX for local (Mac) — it does not co-reside with Ollama; the
+"two runtimes on 16 GB" risk exists only while the Mac's local Ollama is kept
+running alongside it as a second local engine.
 
 ### 2.3 Neural Accelerators — the prefill win (P4)
 
@@ -131,9 +132,10 @@ Result: MLX **~43 % faster decode**, same memory. Recorded in measurements.md.
 P1 cleared the gate (well over the 10 % threshold). The decision is not "is MLX
 faster" (yes) but "when and where to run it":
 
-- **Defer to the M6.** On 16 GB, running MLX alongside Ollama is two resident
-  runtimes; on 32 GB it is comfortable. The 43 % decode win is real but small
-  next to the ~2.5× the M6's bandwidth gives for free.
+- **Defer to the M6.** On 16 GB, keeping the Mac's local Ollama running
+  alongside MLX as a second local engine is two resident runtimes; on 32 GB it
+  is comfortable. The 43 % decode win is real but small next to the ~2.5× the
+  M6's bandwidth gives for free.
 - **Provider shape.** MLX would plug into the existing `Provider` abstraction
   as an HTTP endpoint (an `mlx-lm` server or `vllm-mlx`), not embedded code —
   MLX is Python/Metal and cannot run inside the Go gateway. The gateway's

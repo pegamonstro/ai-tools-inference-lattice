@@ -311,10 +311,10 @@ side directly.
    a time. This is *irrelevant* to Lattice today, which already serialises the
    local path (single inference slot), but it removes llama.cpp's one
    throughput advantage should the design ever parallelise locally.
-2. **A second runtime.** MLX is a Python/Metal library, not a bundled server.
-   Using it means running an MLX inference process on the Mac alongside Ollama,
-   two resident runtimes competing for 16 GB. On the M1 that is memory-risky;
-   on the 32 GB M6 it becomes comfortable.
+2. **A second engine.** MLX is a Python/Metal library, not a bundled server.
+   Under the agreed split — Ollama for cloud (RPi4), MLX for local (Mac) — the
+   two never co-reside; the "two runtimes on 16 GB" risk exists only while the
+   Mac's local Ollama is kept running alongside MLX as a second local engine.
 3. **The M6 changes the calculus.** The M6's per-GPU-core Neural Accelerators
    accelerate *prefill* (compute-bound) up to ~4-6× but give nothing on decode
    (bandwidth-bound) — see
