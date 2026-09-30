@@ -300,10 +300,19 @@ func TestHandleRouteReportsLocalLocality(t *testing.T) {
 	healthMutex.Lock()
 	oldHealthy := gatewayHealthy
 	gatewayHealthy = map[string]bool{"mac-gateway": true}
+	oldGw := gateways["mac-gateway"]
+	gateways["mac-gateway"] = Gateway{
+		ID:           "mac-gateway",
+		Endpoint:     "http://127.0.0.1:8081",
+		Capabilities: []string{"local", "chat"},
+		Models:       []string{"granite4:3b"},
+		Slots:        1,
+	}
 	healthMutex.Unlock()
 	defer func() {
 		healthMutex.Lock()
 		gatewayHealthy = oldHealthy
+		gateways["mac-gateway"] = oldGw
 		healthMutex.Unlock()
 	}()
 

@@ -85,6 +85,63 @@ func hasCapability(caps []string, want string) bool {
 	return false
 }
 
+// hostsModel reports whether a local gateway serves a concrete model. An empty
+// Models list means "announces nothing" — it hosts nothing, so a LOCAL_ONLY
+// request fails closed until the gateway has announced. (Cloud is a wildcard:
+// a subscription hosts any ":cloud" model, and selectGateway skips this check
+// for cloud rather than encode the wildcard here.)
+func hostsModel(models []string, model string) bool {
+	for _, m := range models {
+		if m == model {
+			return true
+		}
+	}
+	return false
+}
+
+// selectGateway is the adequacy routing rule: filter on health (announced
+// gateways only), capability, model-hosting, and slot; then score cloud by
+// lowest cost and local by first match. Cloud gateways are wildcards — no
+// health poll, no hosting check, no slot — so their "adequacy" is cost and
+// rate-limit alone. It returns an error when nothing is adequate, so the
+// caller fails loudly rather than reroutes.
+func selectGateway(requiredCap, model string, registry map[string]Gateway, healthy map[string]bool) (Gateway, error) {
+	var best Gateway
+	bestCost := math.MaxFloat64
+	found := false
+
+	for _, gw := range registry {
+		if !hasCapability(gw.Capabilities, requiredCap) {
+			continue
+		}
+		isLocal := hasCapability(gw.Capabilities, "local") || hasCapability(gw.Capabilities, "tiny")
+		if isLocal {
+			if !healthy[gw.ID] {
+				continue
+			}
+			if !hostsModel(gw.Models, model) {
+				continue
+			}
+			if gw.Slots == 0 {
+				continue
+			}
+		}
+		if requiredCap == "cloud" {
+			if gw.CostPerToken < bestCost {
+				bestCost = gw.CostPerToken
+				best = gw
+				found = true
+			}
+		} else {
+			return gw, nil
+		}
+	}
+	if !found {
+		return Gateway{}, fmt.Errorf("no adequate gateway for capability %q model %q", requiredCap, model)
+	}
+	return best, nil
+}
+
 type Task struct {
 	Req        Request
 	Decision   Decision
@@ -662,46 +719,29 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Routing Logic
-	var targetID, endpoint, modelName string
-
 	healthMutex.RLock()
+	registry := make(map[string]Gateway, len(gateways))
+	for k, v := range gateways {
+		registry[k] = v
+	}
 	healthy := make(map[string]bool, len(gatewayHealthy))
 	for k, v := range gatewayHealthy {
 		healthy[k] = v
 	}
 	healthMutex.RUnlock()
 
-	if requiredCap == "cloud" {
-		bestCost := math.MaxFloat64
-		for id, gw := range gateways {
-			if hasCapability(gw.Capabilities, "cloud") && gw.CostPerToken < bestCost {
-				bestCost = gw.CostPerToken
-				targetID = id
-				endpoint = gw.Endpoint
-			}
-		}
-		modelName = resolveModel(req.Model, "cloud")
-	} else {
-		for id, gw := range gateways {
-			if hasCapability(gw.Capabilities, "local") && healthy[id] {
-				targetID = id
-				endpoint = gw.Endpoint
-				modelName = resolveModel(req.Model, "local")
-				break
-			}
-		}
-		if targetID == "" {
-			tele.Error = "No healthy local gateway found"
-			http.Error(w, "No healthy local gateway found", http.StatusServiceUnavailable)
-			return
-		}
-	}
+	var targetID, endpoint, modelName string
 
-	if targetID == "" {
-		tele.Error = "No suitable provider found"
-		http.Error(w, "No suitable provider found", http.StatusServiceUnavailable)
+	concrete := resolveModel(req.Model, requiredCap)
+	gw, err := selectGateway(requiredCap, concrete, registry, healthy)
+	if err != nil {
+		tele.Error = err.Error()
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
+	targetID = gw.ID
+	endpoint = gw.Endpoint
+	modelName = concrete
 
 	tele.Target = targetID
 	tele.Model = modelName
