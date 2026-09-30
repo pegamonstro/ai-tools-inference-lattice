@@ -127,22 +127,24 @@ any future taxonomy) are reserved bits the vocabulary already admits without a
 protocol change — a gateway that does not yet support one simply omits it, and a
 request that requires it fails to match any adequate gateway, loudly.
 
-### 3.4 Slots = static capacity, not availability
+### 3.4 Slots are a static ceiling; the gateway enforces them
 
 The Gateway announces a **static** ceiling (`slots: 1` for the Mac — one
-resident local model at a time). It does *not* report "I am free right now";
-that is the Control Plane's job, because the Control Plane sees every request it
-has dispatched. Availability is derived:
+resident local model at a time). It also *enforces* it: the Gateway's existing
+single inference slot (the `chan struct{}, 1` serialisation) is the authority
+on actual concurrency — a second local request queues there regardless of what
+the Control Plane decides.
 
-```
-availability(gateway) = gateway.Slots − inflight[gateway]
-```
-
-`inflight` is a `map[string]int` the Control Plane increments on dispatch and
-decrements on completion. The Gateway keeps its own internal single slot (the
-existing `chan struct{}, 1` serialisation) as a backstop; the Control Plane's
-tracking is the *scheduling* layer that stops it from queueing a second request
-on an already-busy gateway when another adequate one exists.
+The Control Plane does **not** track in-flight, because it never dispatches
+inference. Its `/route` returns a `Decision` naming the target endpoint, and the
+Frontend proxies the request there. The Control Plane therefore cannot observe
+completion, so any in-flight counter it kept would leak. It treats `slots` as a
+*static* filter — it will not name a gateway that announces `slots: 0` — and
+leaves dynamic load-balancing to the dispatcher. Today that is the Frontend and
+there is a single local gateway, so the slot check is the only admission gate;
+the `slots` announcement exists so the ceiling is *discoverable* and so a second
+local gateway (the RPi4-internal gateway of the frozen topology) can be filtered
+on the same axis later.
 
 Cloud gateways have `Slots: 0` and instead expose `RateLimit`; their "free slot"
 test is rate-limit headroom, not a concurrency count.
@@ -175,11 +177,13 @@ and the required capability:
 - does not carry the required capability (`local` for `LOCAL_ONLY`, etc.);
 - does not host the concrete model (unless `Models` is empty, the cloud
   wildcard);
-- has no free slot (or, for cloud, no rate-limit headroom).
+- announces zero slots (or, for cloud, no rate-limit headroom).
 
 **Score** — among survivors:
 - cloud → lowest `CostPerToken`;
-- local → fewest `inflight`, tie-broken by first healthy.
+- local → first matching gateway (with one local gateway there is nothing to
+  score against; a second gateway reopens the question and belongs to the
+  dispatcher, not this filter).
 
 **Fail loudly.** If nothing survives, refuse. `LOCAL_ONLY` is never quietly
 promoted to cloud, and a model no gateway hosts is never quietly rerouted to a
@@ -221,13 +225,12 @@ correct at every point.
    the announcement. `localityFor` derives from the entry's capabilities rather
    than which map it lived in.
 4. **Adequacy routing.** Replace the two-branch `handleRoute` selection with the
-   filter → score function of §3.6, driven by `inflight`. `resolveModel` keeps
-   resolving alias → concrete model; the registry now answers concrete model →
-   gateway.
+   filter → score function of §3.6. `resolveModel` keeps resolving alias →
+   concrete model; the registry now answers concrete model → gateway.
 5. **Telemetry and tests.** Extend the routing telemetry to name the chosen
    gateway's adequacy inputs (capability, slot) and add table-driven tests for
    the filter → score function (hosts-model, free-slot, capability-mismatch,
-   wildcard-cloud, cheapest-cloud, fewest-inflight-local).
+   wildcard-cloud, cheapest-cloud).
 
 ## 6. Decision log
 
@@ -241,9 +244,11 @@ correct at every point.
   redefinition.
 - **2026-09-30 — pull, not push.** Announcement via the existing `/health` poll,
   no registration protocol, per the standing "no new infrastructure" rule.
-- **2026-09-30 — slots are static capacity.** Availability is the Control
-  Plane's derived `Slots − inflight`, matching how K8s, LiteLLM, and the
-  inference-server routers separate announced capacity from tracked occupancy.
+- **2026-09-30 — slots are a static ceiling, enforced by the gateway.** The
+  Control Plane filters on `slots > 0` but does not track in-flight: it returns
+  a `Decision` and the Frontend proxies, so the Control Plane never sees
+  completion. This corrects the earlier framing that the Control Plane derived
+  `Slots − inflight`.
 - **2026-09-30 — inference types are an open set.** `chat` + `embeddings`
   implemented now; `tool_calling`/`vision`/`reasoning` admitted as capability
   bits with no protocol change.
