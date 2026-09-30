@@ -60,6 +60,11 @@ func TestSelectGatewayLocalFiltersOnHostingAndSlot(t *testing.T) {
 	if _, err := selectGateway("local", "granite3-moe:3b", reg, map[string]bool{"mac": true}); err == nil {
 		t.Fatal("expected no match for a local gateway that announced no models")
 	}
+	// capability mismatch: a gateway lacking the required capability is filtered
+	reg["mac"] = gw("mac", []string{"cloud"}, []string{"granite3-moe:3b"}, 1, 0)
+	if _, err := selectGateway("local", "granite3-moe:3b", reg, map[string]bool{"mac": true}); err == nil {
+		t.Fatal("expected no match for a gateway without the required capability")
+	}
 }
 
 func TestSelectGatewayCloudPicksCheapest(t *testing.T) {
