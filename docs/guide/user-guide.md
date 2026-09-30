@@ -245,7 +245,7 @@ gateway is healthy.
 | status | body | meaning |
 |---|---|---|
 | `409` | `Control plane: LOCAL_ONLY cannot be served by the cloud-only model "…"` | The request asked for `LOCAL_ONLY` *and* named a cloud-hosted model. Refused, because neither target can satisfy both: the cloud violates the privacy level, and the Mac does not have the model. Drop `LOCAL_ONLY`, or name a model the Mac actually has. |
-| `503` | `Control plane: No healthy local gateway found` | A `LOCAL_ONLY` (or default) request had no healthy local gateway. **This is the sovereignty guarantee working** — it did not fall back to cloud. Retry when the gateway recovers. |
+| `503` | `Control plane: no adequate gateway for capability "local" model "…"` | A `LOCAL_ONLY` (or default) request had no adequate local gateway — none healthy, none hosting the model, or the single slot busy. **This is the sovereignty guarantee working** — it did not fall back to cloud. Retry when the gateway recovers. |
 | `503` | `Control plane unavailable or timed out` | The frontend could not reach the control plane. |
 | `429` | `Local memory pressure: available RAM below safety margin` | The gateway refused the request to avoid forcing the Mac into swap. Retry later. |
 | `500` | `ollama returned status N` | The local provider failed (e.g. model not found, provider down). |

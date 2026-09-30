@@ -51,7 +51,7 @@ control plane never learns of it.
 - **Exit Test** *(as designed; the middle case does not hold today)*:
   - Kill the Gateway process.
   - Send a `LOCAL_PREFERRED` request $\rightarrow$ ~~should be routed to Cloud~~ —
-    actually returns `503 No healthy local gateway found`, because there is no
-    fallback (§2).
+    actually returns `503 no adequate gateway for capability "local" model "…"`,
+    because there is no fallback (§2).
   - Send a `LOCAL_ONLY` request $\rightarrow$ should return `503`. — **Holds.**
   - Restart Gateway $\rightarrow$ route should return to Local. — **Holds.**

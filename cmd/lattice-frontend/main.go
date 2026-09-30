@@ -241,7 +241,8 @@ func proxyInference(w http.ResponseWriter, r *http.Request, upstreamPath string,
 
 	if resp.StatusCode != http.StatusOK {
 		// Propagate the control plane's error status and message (e.g. 503
-		// "No healthy local gateway found") instead of masking it as a 500.
+		// `no adequate gateway for capability "local" model "…"`) instead of
+		// masking it as a 500.
 		body, _ := io.ReadAll(resp.Body)
 		tele.Error = strings.TrimSpace(string(body))
 		http.Error(w, "Control plane: "+string(body), resp.StatusCode)

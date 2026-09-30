@@ -40,7 +40,7 @@ reaches a client.
 
 | fact | where |
 |---|---|
-| Locality is encoded **structurally**: `providers` map → cloud, `gateways` map → local, and each entry carries `Capabilities: ["cloud"｜"local"]` | `cmd/lattice-control/main.go` registries |
+| Locality is **derived from the target's capabilities** in the unified `gateways` registry: an entry advertising `"cloud"` reports `cloud`, everything else reports `local` | `cmd/lattice-control/main.go` `localityFor` |
 | The frontend **literal-matches** a target name to decide whether to inject the local routing envelope | `cmd/lattice-frontend/main.go` `buildProxyBody` |
 | Control's `Decision` carries `target`, `endpoint`, `model_name` — **no class** | `cmd/lattice-control/main.go` |
 | Three telemetry streams; **only two carry `target`**; none carries a class | control, frontend, gateway telemetry |
@@ -61,7 +61,7 @@ The first row is the whole argument for §3: the class is not missing, it is
 |---|---|
 | name | `locality` |
 | values | `local` \| `cloud` \| `unknown` |
-| rule | the **registry the target was chosen from** — `gateways` → `local`, `providers` → `cloud` |
+| rule | the **target's capabilities** — advertising `cloud` → `cloud`, else `local` |
 | default | `unknown` |
 
 The values are deliberately the **same strings already in `Capabilities`**.
