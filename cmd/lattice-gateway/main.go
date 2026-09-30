@@ -690,6 +690,7 @@ func estimateTokens(messages []interface{}) int {
 var (
 	providers     = make(map[string]Provider)
 	providerMutex sync.RWMutex
+	registry      *providerRegistry
 	budgeter      *MemoryBudgeter
 	ollamaURL     string
 
@@ -744,14 +745,23 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	providerName, upstream := resolveModel(req.Model)
 	providerMutex.RLock()
-	provider, ok := providers["ollama"]
+	provider, ok := providers[providerName]
 	providerMutex.RUnlock()
 
 	if !ok {
-		http.Error(w, "No suitable provider found", http.StatusInternalServerError)
+		// Fail loudly: a model mapped to a provider that is not registered is a
+		// configuration fault, never silently re-homed to Ollama.
+		http.Error(w, "No provider registered for model", http.StatusInternalServerError)
 		return
 	}
+
+	// The provider may name the model differently upstream (an MLX Hugging Face
+	// repo id vs the local alias). The alias stays on req for telemetry; only the
+	// copy handed to the provider carries the upstream name.
+	upstreamReq := req
+	upstreamReq.Model = upstream
 
 	// Stream when the client asked for it and the provider supports it: most real
 	// chat clients stream by default and would otherwise render an empty reply.
@@ -761,7 +771,7 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 				logQueuedCancel(req, ctxWindow, t0)
 				return
 			}
-			res, committed, err := sp.ExecuteStream(r.Context(), req, w)
+			res, committed, err := sp.ExecuteStream(r.Context(), upstreamReq, w)
 			<-inferenceSlots
 
 			te := Telemetry{
@@ -790,7 +800,7 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 		logQueuedCancel(req, ctxWindow, t0)
 		return
 	}
-	res, err := provider.Execute(r.Context(), req)
+	res, err := provider.Execute(r.Context(), upstreamReq)
 	<-inferenceSlots
 
 	if err != nil {
@@ -924,11 +934,18 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	// The ceiling is reported rather than configured twice: the gateway is the
 	// only process that knows what a context window costs in KV cache here, so
-	// it is the authority on the number and the control plane relays it.
+	// it is the authority on the number and the control plane relays it. The
+	// providers field announces what the gateway actually serves, so the control
+	// plane discovers it instead of assuming "everything via Ollama".
+	providersField := map[string][]string{}
+	if registry != nil {
+		providersField = registry.capabilityAnnouncement()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":      "ok",
 		"max_context": maxContext,
+		"providers":   providersField,
 	})
 }
 
@@ -948,8 +965,14 @@ func main() {
 	budgeter = NewMemoryBudgeter()
 	ollamaURL = latticeconfig.Env("LATTICE_OLLAMA_URL", "http://localhost:11434")
 
+	cfgPath := latticeconfig.Env("LATTICE_GATEWAY_PROVIDERS", "")
+	reg, provs, err := loadProviders(cfgPath)
+	if err != nil {
+		log.Fatalf("Failed to load providers: %v", err)
+	}
+	registry = reg
 	providerMutex.Lock()
-	providers["ollama"] = &OllamaProvider{Endpoint: ollamaURL}
+	providers = provs
 	providerMutex.Unlock()
 
 	addr := latticeconfig.Env("LATTICE_GATEWAY_ADDR", ":8081")

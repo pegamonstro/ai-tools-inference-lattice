@@ -160,11 +160,17 @@ func monitorHealth() {
 				(resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound)
 			if healthy && resp.StatusCode == http.StatusOK {
 				var h struct {
-					MaxContext int `json:"max_context"`
+					MaxContext int                 `json:"max_context"`
+					Providers  map[string][]string `json:"providers"`
 				}
-				if json.NewDecoder(resp.Body).Decode(&h) == nil && h.MaxContext > 0 {
+				if json.NewDecoder(resp.Body).Decode(&h) == nil {
 					healthMutex.Lock()
-					gatewayMaxContext = h.MaxContext
+					if h.MaxContext > 0 {
+						gatewayMaxContext = h.MaxContext
+					}
+					if h.Providers != nil {
+						gatewayProviders = h.Providers
+					}
 					healthMutex.Unlock()
 				}
 			}
@@ -194,6 +200,12 @@ var (
 	// each health poll. It is advertised by /capabilities so the limit is
 	// discoverable rather than invisible.
 	gatewayMaxContext int
+
+	// gatewayProviders is the gateway's capability announcement, refreshed on each
+	// health poll: provider name to the local models explicitly routed to it. It
+	// lets the control plane see what the gateway actually serves rather than
+	// assuming "everything via Ollama".
+	gatewayProviders map[string][]string
 )
 
 func gatewayRelayPath() string {
@@ -553,6 +565,7 @@ func requiredCapability(privacy, latencyClass, model string) (string, error) {
 func handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	healthMutex.RLock()
 	ctxCap := gatewayMaxContext
+	providers := gatewayProviders
 	healthMutex.RUnlock()
 
 	ids := make([]string, 0, len(capabilities))
@@ -572,8 +585,9 @@ func handleCapabilities(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"context_length": ctxCap,
-		"capabilities":   list,
+		"context_length":    ctxCap,
+		"capabilities":      list,
+		"gateway_providers": providers,
 	})
 }
 
