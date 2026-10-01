@@ -1,5 +1,6 @@
 .DS_Store
 .claude/
+__pycache__/
 /lattice-control
 /lattice-gateway
 /lattice-frontend
