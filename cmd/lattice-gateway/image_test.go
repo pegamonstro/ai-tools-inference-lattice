@@ -79,6 +79,44 @@ func TestHandleImageGenerationsReturnsAnImage(t *testing.T) {
 	}
 }
 
+func TestHandleImageEditsForwardsTheSourceImage(t *testing.T) {
+	var sawPath string
+	var sawBody map[string]interface{}
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&sawBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"image":"aW1hZ2U=","seed":1,"width":512,"height":512,"seconds":1.0}`))
+	}))
+	defer sidecar.Close()
+
+	path := t.TempDir() + "/telemetry-gateway.jsonl"
+	t.Setenv("LATTICE_GATEWAY_TELEMETRY", path)
+	t.Setenv("LATTICE_GATEWAY_IMAGE_MARGIN_MB", "1")
+
+	oldBudgeter, oldProviders, oldRegistry := budgeter, providers, registry
+	budgeter = &MemoryBudgeter{safeMargin: 0, pageSize: 4096}
+	providers = map[string]Provider{"mflux": &MfluxProvider{Endpoint: sidecar.URL}}
+	registry = &providerRegistry{modelProviders: map[string]string{"flux-dev": "mflux"}}
+	defer func() { budgeter, providers, registry = oldBudgeter, oldProviders, oldRegistry }()
+
+	req := httptest.NewRequest("POST", "/v1/images/edits",
+		strings.NewReader(`{"model":"flux-dev","image":"aW1hZ2U=","prompt":"a cat","size":"512x512","n":1}`))
+	req.Header.Set("X-Request-Id", "req-img-edit")
+	rec := httptest.NewRecorder()
+	handleImageEdits(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if sawPath != "/edit" {
+		t.Errorf("forwarded to %q, want /edit", sawPath)
+	}
+	if sawBody["init_image"] != "aW1hZ2U=" {
+		t.Errorf("init_image did not arrive: %v", sawBody["init_image"])
+	}
+}
+
 // The image margin is a different, larger number than the chat margin, because
 // the diffusion model is ~9 GB resident. Below it the request is refused, and
 // the refusal must be loud (429) and keyed.

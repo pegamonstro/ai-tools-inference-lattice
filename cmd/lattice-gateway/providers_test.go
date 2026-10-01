@@ -201,3 +201,40 @@ func TestMfluxProviderGeneratesFromTheSidecar(t *testing.T) {
 		t.Errorf("unexpected response: %+v", res)
 	}
 }
+
+func TestMfluxProviderEditsFromTheSidecar(t *testing.T) {
+	var sawPath string
+	var sawBody map[string]interface{}
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&sawBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"image":"aW1hZ2U=","seed":1,"width":512,"height":512,"seconds":1.0}`))
+	}))
+	defer sidecar.Close()
+
+	p := &MfluxProvider{Endpoint: sidecar.URL}
+	res, err := p.EditImage(context.Background(), ImageRequest{Prompt: "a cat", Image: "aW1hZ2U=", Size: "512x512"})
+	if err != nil {
+		t.Fatalf("EditImage: %v", err)
+	}
+	if sawPath != "/edit" {
+		t.Errorf("path = %q, want /edit", sawPath)
+	}
+	if sawBody["init_image"] != "aW1hZ2U=" {
+		t.Errorf("init_image = %v, want the source image", sawBody["init_image"])
+	}
+	if len(res.Data) != 1 || res.Data[0].B64JSON != "aW1hZ2U=" {
+		t.Errorf("unexpected response: %+v", res)
+	}
+}
+
+func TestMfluxProviderEditRejectsMask(t *testing.T) {
+	// The endpoint is unreachable on purpose: a non-empty Mask must fail in
+	// runImage before any sidecar call, so no request may ever be made.
+	p := &MfluxProvider{Endpoint: "http://127.0.0.1:1"}
+	_, err := p.EditImage(context.Background(), ImageRequest{Prompt: "a cat", Image: "aW1hZ2U=", Mask: "bWFzaw=="})
+	if err == nil {
+		t.Fatal("EditImage with a Mask must fail, not silently drop it")
+	}
+}

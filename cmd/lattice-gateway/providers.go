@@ -488,7 +488,10 @@ func (p *MfluxProvider) oneImage(ctx context.Context, req ImageRequest, op strin
 	if op == "edit" {
 		body["init_image"] = req.Image
 	}
-	b, _ := json.Marshal(body)
+	b, err := json.Marshal(body)
+	if err != nil {
+		return ImageDataItem{}, err
+	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.Endpoint+"/"+op, bytes.NewBuffer(b))
 	if err != nil {
