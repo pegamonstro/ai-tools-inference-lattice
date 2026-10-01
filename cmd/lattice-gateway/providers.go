@@ -104,6 +104,8 @@ func loadProviders(cfgPath string) (*providerRegistry, map[string]Provider, erro
 			provs[p.Name] = &OllamaProvider{Endpoint: p.Endpoint}
 		case "mlx":
 			provs[p.Name] = &MLXProvider{Endpoint: p.Endpoint}
+		case "mflux":
+			provs[p.Name] = &MfluxProvider{Endpoint: p.Endpoint}
 		default:
 			return nil, nil, fmt.Errorf("provider %q has unknown kind %q", p.Name, p.Kind)
 		}
@@ -162,10 +164,20 @@ func modelContextCeiling(model string) int {
 // "embeddings" and "tool_calling" come from Ollama (MLX is chat-only).
 func (reg *providerRegistry) announcedCapabilities() []string {
 	caps := []string{"local", "chat"}
+	seen := map[string]bool{}
+	add := func(v string) {
+		if !seen[v] {
+			seen[v] = true
+			caps = append(caps, v)
+		}
+	}
 	for _, kind := range reg.providerKinds {
-		if kind == "ollama" {
-			caps = append(caps, "embeddings", "tool_calling")
-			break
+		switch kind {
+		case "ollama":
+			add("embeddings")
+			add("tool_calling")
+		case "mflux":
+			add("image_generation")
 		}
 	}
 	return caps
@@ -387,4 +399,141 @@ func (p *MLXProvider) ExecuteStream(ctx context.Context, req Request, w http.Res
 			TotalTokens:      promptTokens + completionTokens,
 		},
 	}, true, nil
+}
+
+// imageTimeout is the gateway→sidecar client timeout for an image call. It is
+// separate from ollamaTimeout because a diffusion step is an order of magnitude
+// slower than a chat token: the sidecar's own MFLUX_GEN_TIMEOUT is 3600 s, and
+// the client must outlast it rather than inherit the 20 m chat budget.
+func imageTimeout() time.Duration {
+	if v := latticeconfig.Env("LATTICE_GATEWAY_IMAGE_TIMEOUT", ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 2 * time.Hour
+}
+
+// ImageProvider is implemented by providers that generate images. handleImage
+// type-asserts to it, exactly as handleInference asserts to StreamingProvider:
+// a request that names a provider without the capability fails loudly rather
+// than being silently proxied to a chat endpoint that does not exist.
+type ImageProvider interface {
+	GenerateImage(ctx context.Context, req ImageRequest) (*ImageResponse, error)
+	EditImage(ctx context.Context, req ImageRequest) (*ImageResponse, error)
+}
+
+// MfluxProvider is an HTTP client for the mflux sidecar (deploy/mflux-sidecar.py),
+// which serves FLUX over POST /generate and /edit. It is image-only: Execute
+// fails loudly, because a chat request naming the image model is a routing fault
+// that must not be silently re-homed to Ollama.
+type MfluxProvider struct {
+	Endpoint string
+}
+
+func (p *MfluxProvider) Name() string { return "mflux" }
+
+// Execute exists only to satisfy Provider. A chat request that names the image
+// model reaches here and must fail loudly rather than be silently dropped.
+func (p *MfluxProvider) Execute(ctx context.Context, req Request) (*Response, error) {
+	return nil, fmt.Errorf("mflux is an image provider, not a chat provider")
+}
+
+func (p *MfluxProvider) GenerateImage(ctx context.Context, req ImageRequest) (*ImageResponse, error) {
+	return p.runImage(ctx, req, "generate")
+}
+
+func (p *MfluxProvider) EditImage(ctx context.Context, req ImageRequest) (*ImageResponse, error) {
+	return p.runImage(ctx, req, "edit")
+}
+
+// runImage translates the OpenAI Images shape to the sidecar's and back, one
+// sidecar call per requested image. The sidecar is single-flight and holds the
+// model resident, so n images are sequential by construction; the gateway slot
+// already serialises them anyway.
+func (p *MfluxProvider) runImage(ctx context.Context, req ImageRequest, op string) (*ImageResponse, error) {
+	width, height, err := parseImageSize(req.Size)
+	if err != nil {
+		return nil, err
+	}
+	if req.ResponseFormat == "url" {
+		return nil, fmt.Errorf("response_format %q unsupported: the sidecar returns base64 only, use b64_json", req.ResponseFormat)
+	}
+	if op == "edit" && req.Mask != "" {
+		return nil, fmt.Errorf("mask is not supported by the mflux sidecar")
+	}
+
+	n := req.N
+	if n <= 0 {
+		n = 1
+	}
+
+	out := &ImageResponse{Created: time.Now().Unix(), Data: make([]ImageDataItem, 0, n)}
+	for i := 0; i < n; i++ {
+		item, err := p.oneImage(ctx, req, op, width, height)
+		if err != nil {
+			return nil, err
+		}
+		out.Data = append(out.Data, item)
+	}
+	return out, nil
+}
+
+func (p *MfluxProvider) oneImage(ctx context.Context, req ImageRequest, op string, width, height int) (ImageDataItem, error) {
+	body := map[string]interface{}{
+		"prompt": req.Prompt,
+		"width":  width,
+		"height": height,
+	}
+	if op == "edit" {
+		body["init_image"] = req.Image
+	}
+	b, _ := json.Marshal(body)
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.Endpoint+"/"+op, bytes.NewBuffer(b))
+	if err != nil {
+		return ImageDataItem{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: imageTimeout()}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return ImageDataItem{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var e struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&e)
+		msg := e.Error
+		if msg == "" {
+			msg = fmt.Sprintf("sidecar status %d", resp.StatusCode)
+		}
+		return ImageDataItem{}, fmt.Errorf("mflux: %s", msg)
+	}
+
+	var side struct {
+		Image string `json:"image"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&side); err != nil {
+		return ImageDataItem{}, err
+	}
+	return ImageDataItem{B64JSON: side.Image}, nil
+}
+
+// parseImageSize turns OpenAI's "WxH" size into the sidecar's width/height.
+// An empty size defaults to 1024x1024 (the sidecar's own default); a size the
+// sidecar could not honour is refused rather than guessed.
+func parseImageSize(size string) (int, int, error) {
+	if size == "" {
+		return 1024, 1024, nil
+	}
+	var w, h int
+	if _, err := fmt.Sscanf(size, "%dx%d", &w, &h); err != nil || w <= 0 || h <= 0 {
+		return 0, 0, fmt.Errorf("invalid size %q: want WxH", size)
+	}
+	return w, h, nil
 }

@@ -2,18 +2,12 @@
   "default_provider": "ollama",
   "providers": [
     { "name": "ollama", "kind": "ollama", "endpoint": "http://localhost:11434" },
-    { "name": "mlx",    "kind": "mlx",    "endpoint": "http://localhost:8080" }
+    { "name": "mlx",    "kind": "mlx",    "endpoint": "http://localhost:8080" },
+    { "name": "mflux",  "kind": "mflux",  "endpoint": "http://127.0.0.1:8899" }
   ],
   "models": [
-    {
-      "name": "qwen2.5-coder:3b",
-      "provider": "mlx",
-      "upstream": "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit"
-    },
-    {
-      "name": "LiquidAI/lfm2.5-2.6b",
-      "provider": "ollama",
-      "context": 65536
-    }
+    { "name": "qwen2.5-coder:3b", "provider": "mlx", "upstream": "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit" },
+    { "name": "LiquidAI/lfm2.5-2.6b", "provider": "ollama", "context": 65536 },
+    { "name": "flux-dev", "provider": "mflux" }
   ]
 }

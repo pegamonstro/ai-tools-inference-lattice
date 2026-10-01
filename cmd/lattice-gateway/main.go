@@ -79,6 +79,33 @@ type Usage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
+// ImageRequest is the OpenAI Images API request. It is a closed shape on
+// purpose: the mflux sidecar honours only prompt, size and count, so the
+// request carries exactly those and the edit source image. An unsupported
+// OpenAI field (quality, style) never reaches a type that would swallow it.
+type ImageRequest struct {
+	Model          string `json:"model"`
+	Prompt         string `json:"prompt"`
+	N              int    `json:"n"`
+	Size           string `json:"size"`
+	ResponseFormat string `json:"response_format"`
+	// Image is the edit source, base64 (data URL or raw). The Mac cannot read
+	// the Pi's filesystem, so the bytes must ride the request.
+	Image string `json:"image"`
+	// Mask is carried only so a request that sends one fails loudly instead of
+	// being silently dropped: the mflux sidecar has no mask support.
+	Mask string `json:"mask"`
+}
+
+type ImageResponse struct {
+	Created int64           `json:"created"`
+	Data    []ImageDataItem `json:"data"`
+}
+
+type ImageDataItem struct {
+	B64JSON string `json:"b64_json"`
+}
+
 // Telemetry is one JSONL line per inference request, written to disk for the
 // Bee-terminal feeder to tail and relay to the log screen.
 type Telemetry struct {

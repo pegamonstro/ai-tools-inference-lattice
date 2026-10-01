@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -132,5 +136,68 @@ func TestAnnouncedModelsFlattensAndDropsCloudTags(t *testing.T) {
 		if !want[m] {
 			t.Fatalf("unexpected model %q (or cloud tag not dropped)", m)
 		}
+	}
+}
+
+func TestLoadProvidersRegistersMfluxAndAnnouncesImageGeneration(t *testing.T) {
+	cfg := `{
+		"default_provider": "ollama",
+		"providers": [
+			{"name": "ollama", "kind": "ollama", "endpoint": "http://localhost:11434"},
+			{"name": "mflux", "kind": "mflux", "endpoint": "http://127.0.0.1:8899"}
+		],
+		"models": [
+			{"name": "flux-dev", "provider": "mflux"}
+		]
+	}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "providers.json")
+	if err := os.WriteFile(path, []byte(cfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg, provs, err := loadProviders(path)
+	if err != nil {
+		t.Fatalf("loadProviders: %v", err)
+	}
+	if _, ok := provs["mflux"].(*MfluxProvider); !ok {
+		t.Errorf("mflux provider not registered as *MfluxProvider")
+	}
+	if !contains(reg.announcedCapabilities(), "image_generation") {
+		t.Errorf("announcedCapabilities missing image_generation: %v", reg.announcedCapabilities())
+	}
+	models := reg.announcedModels(nil)
+	if len(models) != 1 || models[0] != "flux-dev" {
+		t.Errorf("announcedModels = %v, want [flux-dev]", models)
+	}
+}
+
+func TestMfluxProviderGeneratesFromTheSidecar(t *testing.T) {
+	var sawPath string
+	var sawBody map[string]interface{}
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&sawBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"image":"aW1hZ2U=","seed":1,"width":512,"height":512,"seconds":1.0}`))
+	}))
+	defer sidecar.Close()
+
+	p := &MfluxProvider{Endpoint: sidecar.URL}
+	res, err := p.GenerateImage(context.Background(), ImageRequest{Prompt: "a cat", Size: "512x512"})
+	if err != nil {
+		t.Fatalf("GenerateImage: %v", err)
+	}
+	if sawPath != "/generate" {
+		t.Errorf("path = %q, want /generate", sawPath)
+	}
+	if sawBody["prompt"] != "a cat" {
+		t.Errorf("prompt = %v, want 'a cat'", sawBody["prompt"])
+	}
+	if sawBody["width"] != float64(512) || sawBody["height"] != float64(512) {
+		t.Errorf("size not translated to width/height: %v", sawBody)
+	}
+	if len(res.Data) != 1 || res.Data[0].B64JSON != "aW1hZ2U=" {
+		t.Errorf("unexpected response: %+v", res)
 	}
 }
