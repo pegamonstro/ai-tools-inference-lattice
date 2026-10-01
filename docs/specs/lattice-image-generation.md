@@ -158,8 +158,9 @@ the copy is a deployment step, not a committed artifact of the Pi.
 - **Speed.** A baked 4-bit FLUX.1-dev is ~60 s/step on this M1 16 GB under load
   (benchmark §10.5), so a 10-step 512² image is ~10 minutes and a 28-step 1024² image
   is over an hour. The subprocess approach adds a model reload per request. Acceptable
-  for occasional use; fewer steps, an idle Mac, and a resident-model backend (§11) are
-  the recorded levers.
+  for occasional use; fewer steps, an idle Mac, a resident-model backend (§11), and the
+  plugin's `size` preset (`image_gen.mflux.size: small`, ~¼ the pixels) are the
+  recorded levers.
 
 ---
 

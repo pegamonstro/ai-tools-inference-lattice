@@ -12,6 +12,7 @@ Configuration (Hermes ``config.yaml``):
       mflux:
         url: http://<mac-tailnet>:8899   # required; no default, per the no-address rule
         token: ""                         # optional; must match the sidecar's MFLUX_TOKEN
+        size: medium                      # optional; "small" (⅓–¼ px) or "medium" (default)
 
 The plugin's ``is_available()`` deliberately does NOT probe the sidecar — the picker
 calls it on every paint and must not block on the network; a down sidecar surfaces as
@@ -36,12 +37,14 @@ logger = __import__("logging").getLogger(__name__)
 
 _MODEL_ID = "flux-uncensored"
 
-# FLUX.1-dev aspect ratios (multiples of 64, ~1MP) for the three Hermes aspects.
-_ASPECT_SIZES = {
-    "landscape": (1344, 768),
-    "square": (1024, 1024),
-    "portrait": (768, 1344),
+# FLUX.1-dev sizes (multiples of 64) for the three Hermes aspects. Pixel count is the
+# load lever: the diffusion transformer denoises the whole canvas regardless of prompt,
+# so "small" (⅓–¼ the pixels) is what cuts compute and memory on the 16 GB host.
+_SIZES = {
+    "small":  {"landscape": (768, 448), "square": (512, 512), "portrait": (448, 768)},
+    "medium": {"landscape": (1344, 768), "square": (1024, 1024), "portrait": (768, 1344)},
 }
+_DEFAULT_SIZE = "medium"
 
 # Must outlast the sidecar's own GEN_TIMEOUT (3600) — the plugin waits on the backend
 # it drives, and a 4-step image can exceed 30 min when the M1 is under load.
@@ -52,6 +55,18 @@ def _sidecar_url() -> Optional[str]:
     cfg = load_image_gen_config("mflux")
     raw = os.environ.get("MFLUX_SIDECAR_URL") or cfg.get("url") or cfg.get("endpoint")
     return raw.strip().rstrip("/") if isinstance(raw, str) and raw.strip() else None
+
+
+def _configured_size() -> Optional[str]:
+    cfg = load_image_gen_config("mflux")
+    raw = cfg.get("size")
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None
+
+
+def _resolve_size(value: Optional[str]) -> str:
+    """Clamp a size request to ``_SIZES``; unknown values coerce to the default."""
+    v = value.strip().lower() if isinstance(value, str) else ""
+    return v if v in _SIZES else _DEFAULT_SIZE
 
 
 def _sidecar_token() -> str:
@@ -123,7 +138,8 @@ class MfluxImageGenProvider(ImageGenProvider):
             )
 
         aspect = resolve_aspect_ratio(aspect_ratio)
-        width, height = _ASPECT_SIZES[aspect]
+        size = _resolve_size(kwargs.get("size") or _configured_size())
+        width, height = _SIZES[size][aspect]
 
         payload: Dict[str, Any] = {"prompt": prompt, "width": width, "height": height}
         for key in ("negative_prompt", "steps", "guidance", "seed"):
@@ -182,7 +198,9 @@ class MfluxImageGenProvider(ImageGenProvider):
                 provider="mflux", model=_MODEL_ID, prompt=prompt, aspect_ratio=aspect,
             )
 
-        extra = {"seed": data["seed"]} if data.get("seed") is not None else None
+        extra = {"size": size}
+        if data.get("seed") is not None:
+            extra["seed"] = data["seed"]
         return success_response(
             image=path, model=_MODEL_ID, prompt=prompt, aspect_ratio=aspect,
             provider="mflux", extra=extra,
