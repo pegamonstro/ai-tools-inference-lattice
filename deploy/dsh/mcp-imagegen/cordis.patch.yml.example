@@ -1,0 +1,14 @@
+# Example DSH cordis.patch.yml — copy to ~/.dsh/profiles/<profile>/cordis.patch.yml
+# and fill the absolute path to server.py. Declares the lattice-imagegen MCP
+# server as a model-callable tool provider over stdio, with a timeout that
+# outlasts a 1024² generation (the 60 s default kills every image before it
+# finishes).
+- id: lattice-imagegen
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: lattice-imagegen
+    transport: stdio
+    command: python3
+    args:
+      - /absolute/path/to/deploy/dsh/mcp-imagegen/server.py
+    toolCallTimeoutMs: 3600000

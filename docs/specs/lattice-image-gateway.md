@@ -1,6 +1,6 @@
 # Spec: Image generation through the gateway, and the MCP server that fronts it
 
-**Status:** Draft
+**Status:** Implemented
 **Scope:** gateway `POST /v1/images/generations` + `/v1/images/edits`, frontend
 routes, a `mflux` provider kind, and a thin MCP server (`deploy/dsh/mcp-imagegen/`)
 that fronts the route for DSH.
@@ -246,3 +246,7 @@ frontend→control hop is ~5 s routing-only (fine).
   full-path discipline (frontend→control→gateway). Reversible: a gateway-native MCP
   handler is a bounded alternative if "Go stdlib only, one process" is preferred over
   the SDK's compatibility guarantee.
+- **2026-10-01 — implemented.** Tasks 1-5 of
+  [the plan](../plans/2026-10-01-image-gateway-mcp.md): gateway image routes,
+  the mflux provider, frontend routes, and the MCP server. The decision log's
+  three entries above stand unchanged.
