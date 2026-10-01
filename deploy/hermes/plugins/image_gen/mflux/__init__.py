@@ -12,7 +12,7 @@ Configuration (Hermes ``config.yaml``):
       mflux:
         url: http://<mac-tailnet>:8899   # required; no default, per the no-address rule
         token: ""                         # optional; must match the sidecar's MFLUX_TOKEN
-        size: medium                      # optional; "small" (⅓–¼ px) or "medium" (default)
+        size: small                       # optional; "small" (⅓–¼ px, default) or "medium" (~1MP)
 
 The plugin's ``is_available()`` deliberately does NOT probe the sidecar — the picker
 calls it on every paint and must not block on the network; a down sidecar surfaces as
@@ -44,7 +44,7 @@ _SIZES = {
     "small":  {"landscape": (768, 448), "square": (512, 512), "portrait": (448, 768)},
     "medium": {"landscape": (1344, 768), "square": (1024, 1024), "portrait": (768, 1344)},
 }
-_DEFAULT_SIZE = "medium"
+_DEFAULT_SIZE = "small"
 
 # Must outlast the sidecar's own GEN_TIMEOUT (3600) — the plugin waits on the backend
 # it drives, and a 4-step image can exceed 30 min when the M1 is under load.
