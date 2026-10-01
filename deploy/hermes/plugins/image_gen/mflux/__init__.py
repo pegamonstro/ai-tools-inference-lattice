@@ -43,7 +43,9 @@ _ASPECT_SIZES = {
     "portrait": (768, 1344),
 }
 
-_GEN_TIMEOUT = 600  # seconds; a FLUX.1-dev image on an M1 is slow
+# Must outlast the sidecar's own GEN_TIMEOUT (1800) — the plugin waits on the backend
+# it drives, and a default 4-step 1024² generation is ~13 min (measured ~197 s/step).
+_GEN_TIMEOUT = 1800
 
 
 def _sidecar_url() -> Optional[str]:
