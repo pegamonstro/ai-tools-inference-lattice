@@ -463,9 +463,80 @@ func TestHandleEmbeddingsForwardsWithoutARoutingEnvelope(t *testing.T) {
 	}
 }
 
+// An image is not a chat. The upstream path must be /v1/images/generations, the
+// client's own body must arrive intact, and no routing envelope may be injected.
+// The id rides a header, so the gateway's own line stays keyed.
+func TestHandleImageForwardsWithoutARoutingEnvelope(t *testing.T) {
+	var sawPath string
+	var sawBody map[string]interface{}
+	var sawHeader string
+
+	var target *httptest.Server
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(Decision{
+			Target:    "mac-gateway",
+			Locality:  "local",
+			Endpoint:  target.URL,
+			ModelName: "flux-dev",
+		})
+	}))
+	defer control.Close()
+
+	target = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawPath = r.URL.Path
+		sawHeader = r.Header.Get("X-Request-Id")
+		json.NewDecoder(r.Body).Decode(&sawBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"created":1,"data":[{"b64_json":"aW1hZ2U="}]}`))
+	}))
+	defer target.Close()
+
+	oldControl, oldTelemetry := controlURL, telemetryPath
+	controlURL = control.URL
+	telemetryPath = t.TempDir() + "/telemetry-frontend.jsonl"
+	defer func() { controlURL, telemetryPath = oldControl, oldTelemetry }()
+
+	body := `{"model":"flux-dev","prompt":"a cat","size":"512x512","n":1}`
+	rec := httptest.NewRecorder()
+	handleImageGenerations(rec, httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if sawPath != "/v1/images/generations" {
+		t.Errorf("upstream path = %q, want /v1/images/generations", sawPath)
+	}
+	if sawBody["prompt"] != "a cat" {
+		t.Errorf("prompt did not arrive intact: %v", sawBody["prompt"])
+	}
+	if sawBody["size"] != "512x512" {
+		t.Errorf("size was dropped: %v", sawBody)
+	}
+	if _, ok := sawBody["routing"]; ok {
+		t.Errorf("a routing envelope reached the image path: %v", sawBody["routing"])
+	}
+
+	logged, err := os.ReadFile(telemetryPath)
+	if err != nil {
+		t.Fatalf("no frontend telemetry line: %v", err)
+	}
+	var line Telemetry
+	if err := json.Unmarshal(bytes.TrimSpace(logged), &line); err != nil {
+		t.Fatalf("frontend telemetry is not one JSON line: %v (%s)", err, logged)
+	}
+	if sawHeader != line.RequestID {
+		t.Errorf("X-Request-Id = %q, want %q — the gateway's line would be unkeyed",
+			sawHeader, line.RequestID)
+	}
+	if line.Locality != "local" {
+		t.Errorf("frontend locality = %q, want local", line.Locality)
+	}
+}
+
 func TestRouterServesEveryClientFacingRoute(t *testing.T) {
 	mux := newRouter()
-	for _, path := range []string{"/v1/chat/completions", "/v1/embeddings", "/v1/models", "/health"} {
+	for _, path := range []string{"/v1/chat/completions", "/v1/embeddings", "/v1/images/generations", "/v1/images/edits", "/v1/models", "/health"} {
 		if _, pattern := mux.Handler(httptest.NewRequest("POST", path, nil)); pattern != path {
 			t.Errorf("%s is served as %q — an unregistered route is a 404 to the client", path, pattern)
 		}

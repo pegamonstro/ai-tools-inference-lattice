@@ -180,6 +180,18 @@ func handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	proxyInference(w, r, "/v1/embeddings", false)
 }
 
+// handleImageGenerations shares the chat flow — parse, ask control, proxy — and
+// differs in exactly two ways: the upstream path, and the absence of a routing
+// envelope (an image body is not the chat translation layer's contract). The
+// image model's untagged name routes local through control's existing rule.
+func handleImageGenerations(w http.ResponseWriter, r *http.Request) {
+	proxyInference(w, r, "/v1/images/generations", false)
+}
+
+func handleImageEdits(w http.ResponseWriter, r *http.Request) {
+	proxyInference(w, r, "/v1/images/edits", false)
+}
+
 func proxyInference(w http.ResponseWriter, r *http.Request, upstreamPath string, injectRouting bool) {
 	tTotalStart := time.Now()
 
@@ -295,6 +307,8 @@ func newRouter() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", handleChat)
 	mux.HandleFunc("/v1/embeddings", handleEmbeddings)
+	mux.HandleFunc("/v1/images/generations", handleImageGenerations)
+	mux.HandleFunc("/v1/images/edits", handleImageEdits)
 	mux.HandleFunc("/v1/models", handleModels)
 	mux.HandleFunc("/health", handleHealth)
 	return mux
