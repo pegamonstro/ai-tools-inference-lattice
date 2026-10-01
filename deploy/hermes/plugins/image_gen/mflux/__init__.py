@@ -43,9 +43,9 @@ _ASPECT_SIZES = {
     "portrait": (768, 1344),
 }
 
-# Must outlast the sidecar's own GEN_TIMEOUT (1800) — the plugin waits on the backend
-# it drives, and a default 4-step 1024² generation is ~13 min (measured ~197 s/step).
-_GEN_TIMEOUT = 1800
+# Must outlast the sidecar's own GEN_TIMEOUT (3600) — the plugin waits on the backend
+# it drives, and a 4-step image can exceed 30 min when the M1 is under load.
+_GEN_TIMEOUT = 3600
 
 
 def _sidecar_url() -> Optional[str]:

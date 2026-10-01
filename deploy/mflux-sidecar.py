@@ -48,7 +48,7 @@ EXTRA = os.environ.get("MFLUX_EXTRA_ARGS", "").split()
 BIND = os.environ.get("MFLUX_BIND", "127.0.0.1")
 PORT = int(os.environ.get("MFLUX_PORT", "8899"))
 TOKEN = os.environ.get("MFLUX_TOKEN", "")  # optional shared secret
-GEN_TIMEOUT = int(os.environ.get("MFLUX_GEN_TIMEOUT", "1800"))
+GEN_TIMEOUT = int(os.environ.get("MFLUX_GEN_TIMEOUT", "3600"))
 
 _lock = threading.Lock()
 
