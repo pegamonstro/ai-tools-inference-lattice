@@ -431,7 +431,10 @@ func TestHandleImageGenerationsReturnsAnImage(t *testing.T) {
 
 	path := t.TempDir() + "/telemetry-gateway.jsonl"
 	t.Setenv("LATTICE_GATEWAY_TELEMETRY", path)
-	t.Setenv("LATTICE_GATEWAY_IMAGE_MARGIN_MB", "0")
+	// 1 MiB, not 0: imageMarginBytes rejects a non-positive value and falls back
+	// to the 10 GiB default, which would make this test depend on the machine's
+	// real free memory. 1 MiB is below any host's free memory, so the check passes.
+	t.Setenv("LATTICE_GATEWAY_IMAGE_MARGIN_MB", "1")
 
 	oldBudgeter, oldProviders, oldRegistry := budgeter, providers, registry
 	budgeter = &MemoryBudgeter{safeMargin: 0, pageSize: 4096}
