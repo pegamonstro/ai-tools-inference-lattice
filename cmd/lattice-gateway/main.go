@@ -251,18 +251,17 @@ func NewMemoryBudgeter() *MemoryBudgeter {
 	}
 }
 
-func (mb *MemoryBudgeter) CanAccommodate() bool {
-	// Get current free memory via vm_stat
+// freeBytes reads the host's free + inactive memory from vm_stat, converted by
+// page size. Extracted from CanAccommodate so a caller can ask the same question
+// against a different margin: the image model is far larger than a chat model,
+// so its margin is a different number, not a different check.
+func (mb *MemoryBudgeter) freeBytes() uint64 {
 	out, err := exec.Command("vm_stat").Output()
 	if err != nil {
-		return false
+		return 0
 	}
-
-	// vm_stat outputs page counts; multiply by the actual page size.
-	// We look for "Pages free" and "Pages inactive"
 	lines := strings.Split(string(out), "\n")
 	var freePages, inactivePages uint64
-
 	for _, line := range lines {
 		if strings.Contains(line, "Pages free") {
 			fmt.Sscanf(line, "Pages free: %d", &freePages)
@@ -270,9 +269,18 @@ func (mb *MemoryBudgeter) CanAccommodate() bool {
 			fmt.Sscanf(line, "Pages inactive: %d", &inactivePages)
 		}
 	}
+	return (freePages + inactivePages) * mb.pageSize
+}
 
-	availableBytes := (freePages + inactivePages) * mb.pageSize
-	return availableBytes > mb.safeMargin
+func (mb *MemoryBudgeter) CanAccommodate() bool {
+	return mb.freeBytes() > mb.safeMargin
+}
+
+// CanAccommodateWith is CanAccommodate against a caller-supplied margin. The
+// image handler uses it with the image margin, which is an order of magnitude
+// larger than the chat margin because the diffusion model is ~9 GB resident.
+func (mb *MemoryBudgeter) CanAccommodateWith(marginBytes uint64) bool {
+	return mb.freeBytes() > marginBytes
 }
 
 // --- Provider Abstraction ---
@@ -930,6 +938,119 @@ func handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	logTelemetry(te)
 }
 
+// defaultImageModel is the Lattice alias for the diffusion model. An image
+// request that omits model gets this rather than failing on an empty name.
+const defaultImageModel = "flux-dev"
+
+// imageMarginBytes is the free-RAM floor below which an image request is
+// refused. It is separate from the chat margin (LATTICE_GATEWAY_MEMORY_MARGIN_MB)
+// because the diffusion model is ~9 GB resident — far larger than any chat
+// model — so a chat-sized margin would admit an image load that thrashes swap.
+func imageMarginBytes() uint64 {
+	mb := 10240
+	if v := latticeconfig.Env("LATTICE_GATEWAY_IMAGE_MARGIN_MB", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			mb = n
+		}
+	}
+	return uint64(mb) * 1024 * 1024
+}
+
+func handleImageGenerations(w http.ResponseWriter, r *http.Request) {
+	handleImage(w, r, "generate")
+}
+
+func handleImageEdits(w http.ResponseWriter, r *http.Request) {
+	handleImage(w, r, "edit")
+}
+
+// handleImage mirrors handleEmbeddings: the same single slot, the same
+// telemetry-on-every-exit discipline, but against the image memory margin and
+// the mflux provider. The id rides the X-Request-Id header, exactly as an
+// embedding's does — an image body carries no routing envelope.
+func handleImage(w http.ResponseWriter, r *http.Request, op string) {
+	t0 := time.Now()
+	requestID := r.Header.Get("X-Request-Id")
+
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var img ImageRequest
+	if err := json.Unmarshal(bodyBytes, &img); err != nil {
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if img.Model == "" {
+		img.Model = defaultImageModel
+	}
+
+	if !budgeter.CanAccommodateWith(imageMarginBytes()) {
+		fmt.Println("  Memory pressure: available RAM below image margin. Rejecting to avoid swap.")
+		logTelemetry(Telemetry{
+			RequestID: requestID,
+			Model:     img.Model,
+			Elapsed:   time.Since(t0).Seconds(),
+			Error:     "memory_pressure",
+		})
+		http.Error(w, "Local memory pressure: available RAM below image margin", http.StatusTooManyRequests)
+		return
+	}
+
+	if !acquireSlot(r.Context()) {
+		logTelemetry(Telemetry{
+			RequestID: requestID,
+			Model:     img.Model,
+			Elapsed:   time.Since(t0).Seconds(),
+			Error:     "client_cancelled_while_queued",
+		})
+		return
+	}
+	defer func() { <-inferenceSlots }()
+
+	providerName, _ := resolveModel(img.Model)
+	providerMutex.RLock()
+	provider := providers[providerName]
+	providerMutex.RUnlock()
+	if provider == nil {
+		logTelemetry(Telemetry{RequestID: requestID, Model: img.Model, Elapsed: time.Since(t0).Seconds(), Error: "no provider registered for model"})
+		http.Error(w, "No provider registered for model", http.StatusInternalServerError)
+		return
+	}
+
+	ip, ok := provider.(ImageProvider)
+	if !ok {
+		logTelemetry(Telemetry{RequestID: requestID, Model: img.Model, Elapsed: time.Since(t0).Seconds(), Error: fmt.Sprintf("provider %q is not an image provider", providerName)})
+		http.Error(w, "Provider is not an image provider", http.StatusInternalServerError)
+		return
+	}
+
+	var res *ImageResponse
+	if op == "edit" {
+		res, err = ip.EditImage(r.Context(), img)
+	} else {
+		res, err = ip.GenerateImage(r.Context(), img)
+	}
+
+	te := Telemetry{RequestID: requestID, Model: img.Model, Elapsed: time.Since(t0).Seconds()}
+	if err != nil {
+		te.Error = err.Error()
+		logTelemetry(te)
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	logTelemetry(te)
+
+	// Set this explicitly: without it Go sniffs the JSON body as text/plain,
+	// which strict OpenAI clients reject.
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
+}
+
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !budgeter.CanAccommodate() {
 		http.Error(w, "Memory pressure high", http.StatusServiceUnavailable)
@@ -985,6 +1106,8 @@ func newRouter() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", handleInference)
 	mux.HandleFunc("/v1/embeddings", handleEmbeddings)
+	mux.HandleFunc("/v1/images/generations", handleImageGenerations)
+	mux.HandleFunc("/v1/images/edits", handleImageEdits)
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/telemetry", handleTelemetry)
 	return mux
