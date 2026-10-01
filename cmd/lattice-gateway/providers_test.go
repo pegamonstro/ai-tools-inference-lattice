@@ -230,11 +230,20 @@ func TestMfluxProviderEditsFromTheSidecar(t *testing.T) {
 }
 
 func TestMfluxProviderEditRejectsMask(t *testing.T) {
-	// The endpoint is unreachable on purpose: a non-empty Mask must fail in
-	// runImage before any sidecar call, so no request may ever be made.
-	p := &MfluxProvider{Endpoint: "http://127.0.0.1:1"}
+	// A non-empty Mask must fail in runImage before any sidecar call, so the
+	// sidecar must never be reached. Assert both: an error is returned AND zero
+	// requests were made (a connection-refused error alone would not prove the
+	// mask was rejected rather than silently dropped).
+	var calls int
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++ }))
+	defer sidecar.Close()
+
+	p := &MfluxProvider{Endpoint: sidecar.URL}
 	_, err := p.EditImage(context.Background(), ImageRequest{Prompt: "a cat", Image: "aW1hZ2U=", Mask: "bWFzaw=="})
 	if err == nil {
 		t.Fatal("EditImage with a Mask must fail, not silently drop it")
+	}
+	if calls != 0 {
+		t.Errorf("sidecar called %d times, want 0 — the mask must be rejected before any request", calls)
 	}
 }
