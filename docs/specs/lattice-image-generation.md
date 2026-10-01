@@ -22,6 +22,11 @@ reaches it through its existing `image_gen` plugin system.
 
 ## 2. Why not the gateway
 
+**Superseded 2026-10-01 by [lattice-image-gateway.md](lattice-image-gateway.md)**,
+which routes image generation *through* the gateway via an OpenAI Images route. This
+section is retained as the historical record of the original decision; its conclusion
+is reversed.
+
 The first question to answer is *why this does not go through Lattice's gateway*.
 The answer is a modality boundary, not a workaround:
 
@@ -186,7 +191,7 @@ The model is uncensored and the endpoint is image-generation — worth being exp
 
 ## 8. Non-goals
 
-- **Gateway/control-plane routing for images.** Explicitly out: Lattice stays text.
+- **Gateway/control-plane routing for images.** ~~Explicitly out: Lattice stays text.~~ **Superseded 2026-10-01** — now in scope, speced in [lattice-image-gateway.md](lattice-image-gateway.md).
 - **Video generation** — out of scope; image gen only.
 - **SDXL/Pony** — rejected (§3); mflux cannot serve them.
 - **A Lattice-native diffusion provider kind** — rejected (§2); the Hermes plugin
