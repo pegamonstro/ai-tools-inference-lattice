@@ -3,12 +3,19 @@
 # server as a model-callable tool provider over stdio, with a timeout that
 # outlasts a 1024² generation (the 60 s default kills every image before it
 # finishes).
-- id: lattice-imagegen
-  name: '@deepseek-ai/dsh-mcp-client'
-  config:
-    serverName: lattice-imagegen
-    transport: stdio
-    command: python3
-    args:
-      - /absolute/path/to/deploy/dsh/mcp-imagegen/server.py
-    toolCallTimeoutMs: 3600000
+#
+# The `insert:` form is required: a bare top-level `{id, name, config}` entry
+# is read by the loader as an *override* of an existing entry id, not a new
+# plugin instance, so it fails with `patch: entry "lattice-imagegen" not
+# found` against the profile's empty `[]` root. `insert:` (with no `id`) is
+# the "insert list" the patch layer appends to the entry list.
+- insert:
+    - id: lattice-imagegen
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: lattice-imagegen
+        transport: stdio
+        command: python3
+        args:
+          - /absolute/path/to/deploy/dsh/mcp-imagegen/server.py
+        toolCallTimeoutMs: 3600000
