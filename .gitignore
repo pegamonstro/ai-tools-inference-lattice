@@ -14,5 +14,6 @@ __pycache__/
 !deploy/hermes/plugins/image_gen/mflux/__init__.py
 !deploy/dsh/mcp-imagegen/server.py
 !deploy/dsh/mcp-imagegen/test_server.py
+!deploy/dsh/mcp-imagegen/test_stdio.py
 /bin/
 /deploy/*.env
