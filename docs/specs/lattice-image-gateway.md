@@ -166,6 +166,12 @@ In `~/.dsh/profiles/*/cordis.patch.yml`, declare the `dsh-mcp-client` plugin wit
 `toolCallTimeoutMs` to ≥ 3,600,000 ms. This is mandatory: the default is 60,000 ms,
 and a 512² image is ~10 minutes — every generation would be killed at 60 s.
 
+As of 2026-10-02 the Pi runs DSH `0.2.0-rc.2` with the `dsh-mcp-client` plugin at
+`0.2.0-rc.2` — the plugin must match 0.2.0, or DSH silently disables the imagegen
+row as peer-incompatible. The headless chat model is `deepseek-v4.1-flash:cloud`;
+`deepseek-v4-flash:cloud` was superseded because DeepSeek retired its `:0731`
+snapshot (every turn returns a 410 since 2026-09-25).
+
 ---
 
 ## 9. Timeouts — the silent killer
