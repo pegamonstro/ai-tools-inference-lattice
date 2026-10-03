@@ -277,4 +277,4 @@ The model is uncensored and the endpoint is image-generation — worth being exp
   dev's weights and may be weaker on the 4-step distilled schnell — **dev + Lustly
   is the fallback** (`flux-dev`, currently on the M1) if schnell+Lustly underperforms.
   First-run 512² 4-step measured ~28 s (LoRA download + load + steps). See the M6
-  benchmark log (`m6-server/benchmarks.md`, round 4).
+  benchmark log (`docs/benchmarks-m6.md`, round 4).
