@@ -309,22 +309,24 @@ gateways coexist without a name collision.
   `locality: local`. The gateway's `POST /v1/images/generations` returns
   `{data:[{b64_json}]}` from a prompt.
 
-### Operational caveat — reboot kills the LaunchAgents (headless)
+### Operational note — reboot auto-recovery (resolved)
 
 The M6's services are `gui/$UID` LaunchAgents, which only exist while a user is logged
-into the console. **Auto-login is not configured**, so a reboot lands the M6 at the
-login screen with Ollama, the gateway, the mflux sidecar and speech all down, and they
-cannot be bootstrapped over SSH (`gui/$UID` missing, `user/$UID` refuses). Fixes, in
-order of preference for a permanent headless gateway:
+into the console. **Auto-login is configured** for `igor` (`autoLoginUser = igor`,
+FileVault off), so a reboot now boots straight into `igor`'s console session and
+Ollama, the gateway, the mflux sidecar, speech and Tailscale all auto-start. Verified
+across a reboot (2026-10-04): Tailscale reconnects (direct peer to rpi4), the gateway
+and Ollama return, and the control plane re-marks `m6-gateway` healthy with no manual
+steps.
 
-1. **Auto-login** for `igor` (System Settings → Users & Groups) — simplest; the
-   console session then exists at boot and every agent auto-starts.
-2. **LaunchDaemons** (`/Library/LaunchDaemons/`, root) — the "proper" headless answer,
-   but a bigger change to `install-macos.sh` and needs an admin account (`igor` has no
-   sudo).
+Notes for the record:
 
-Until one of those is in place, every reboot needs a manual console login (physical
-or Screen Sharing) to bring the lattice back up.
+- `igor` is a full admin (group 80) with working sudo — the earlier "igor has no sudo"
+  note was wrong. The LaunchDaemon path (`/Library/LaunchDaemons/`, root) remains
+  available if auto-login is ever disabled.
+- Tailscale (standalone GUI app) is not a `gui` LaunchAgent; it runs via a login-item
+  helper (`io.tailscale.ipn.macsys.login-item-helper`) plus a system extension, so it
+  shares the same console-login dependency.
 
 ## Gemma 4 context ceiling — per-model caps (round 5)
 
