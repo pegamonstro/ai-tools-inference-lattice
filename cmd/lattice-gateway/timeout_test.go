@@ -40,21 +40,24 @@ func TestOllamaTimeoutDefaultsGenerouslyAndHonoursOverride(t *testing.T) {
 // single-slot machine that would block everyone behind an abandoned request.
 func TestAcquireSlotYieldsToCancelledContext(t *testing.T) {
 	// Fill the only slot.
-	inferenceSlots <- struct{}{}
+	inferenceSlots.setLimit(1)
+	if !inferenceSlots.acquire(context.Background()) {
+		t.Fatal("could not fill the slot")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if acquireSlot(ctx) {
-		<-inferenceSlots
+		inferenceSlots.release()
 		t.Fatal("acquireSlot took the slot for a cancelled caller")
 	}
 
 	// Free the slot and confirm a live caller still gets it.
-	<-inferenceSlots
+	inferenceSlots.release()
 	if !acquireSlot(context.Background()) {
 		t.Fatal("acquireSlot refused a live caller with a free slot")
 	}
-	<-inferenceSlots
+	inferenceSlots.release()
 }
 
 // The timeout is a real bound: a server that never answers must produce an error,

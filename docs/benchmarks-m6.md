@@ -68,7 +68,12 @@ blue square top-left, white background (see `test.png`).
     that is a separate model selection question.
 - **Memory ceiling**: 12.7 + 17.3 + 5.5 = 34.5 GB > 32 GB, so the three cannot be
   resident simultaneously (Ollama evicts). Two big + one small does not co-exist.
-  The gateway reports `slots: 1`, so this is expected — one model serves at a time.
+  The gateway's `slots` is now *dynamic* (model-size aware, recomputed each health
+  poll from free memory vs. `/api/tags` sizes, capped by `LATTICE_GATEWAY_MAX_SLOTS`):
+  with a 26b-class model resident (~18 GB RSS leaves ~4 GB usable) it reports
+  `slots: 1`; once the big model evicts and memory frees, the count rises and several
+  small models can serve concurrently. The `MemoryBudgeter` remains the per-request
+  backstop that rejects an individual load overrunning the safety margin.
 
 ## z-image-turbo — image-gen (done)
 

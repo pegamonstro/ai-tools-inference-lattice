@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -310,6 +311,122 @@ func (mb *MemoryBudgeter) CanAccommodate() bool {
 // larger than the chat margin because the diffusion model is ~9 GB resident.
 func (mb *MemoryBudgeter) CanAccommodateWith(marginBytes uint64) bool {
 	return mb.freeBytes() > marginBytes
+}
+
+// availableBytes is the memory actually usable for new model loads: freeBytes
+// minus the safety margin, floored at zero. Slot sizing counts models into this
+// rather than the raw free figure so a load never plans to consume the margin
+// the budgeter relies on to avoid swap.
+func (mb *MemoryBudgeter) availableBytes() uint64 {
+	free := mb.freeBytes()
+	if free <= mb.safeMargin {
+		return 0
+	}
+	return free - mb.safeMargin
+}
+
+// slotSemaphore is a dynamic counting semaphore. A fixed-size Go channel cannot
+// resize, so the limit is a mutex-guarded field and waiting uses sync.Cond; the
+// health poll raises or lowers the limit as free memory permits.
+type slotSemaphore struct {
+	mu    sync.Mutex
+	cond  *sync.Cond
+	used  int
+	limit int
+}
+
+func newSlotSemaphore(limit int) *slotSemaphore {
+	s := &slotSemaphore{limit: limit}
+	s.cond = sync.NewCond(&s.mu)
+	return s
+}
+
+// setLimit changes the concurrency ceiling and wakes waiters, so a raise frees
+// queued requests immediately and a lower just takes effect on the next acquire.
+func (s *slotSemaphore) setLimit(n int) {
+	s.mu.Lock()
+	s.limit = n
+	s.cond.Broadcast()
+	s.mu.Unlock()
+}
+
+func (s *slotSemaphore) limitValue() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.limit
+}
+
+// acquire takes a slot, blocking until one is free or ctx is done. It returns
+// false when the caller cancelled while queued, so an abandoned request does not
+// hold a slot forever (the same contract the old channel-based acquireSlot had).
+func (s *slotSemaphore) acquire(ctx context.Context) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for s.used >= s.limit {
+		if ctx.Err() != nil {
+			return false
+		}
+		done := ctx.Done()
+		if done == nil {
+			s.cond.Wait()
+			continue
+		}
+		// Wake the cond wait when the context is cancelled so the loop above can
+		// re-check and return false. One goroutine per blocked acquire is cheap:
+		// acquires block only while the host is at its concurrency limit.
+		stopped := make(chan struct{})
+		go func() {
+			select {
+			case <-done:
+				s.cond.Broadcast()
+			case <-stopped:
+			}
+		}()
+		s.cond.Wait()
+		close(stopped)
+	}
+	s.used++
+	return true
+}
+
+func (s *slotSemaphore) release() {
+	s.mu.Lock()
+	s.used--
+	s.cond.Broadcast()
+	s.mu.Unlock()
+}
+
+// computeSlots returns how many of the given model sizes (bytes) fit into
+// available memory using a smallest-first greedy fit, which maximizes the count.
+// Clamped to [1, max]. The result is a ceiling, not a reservation: the budgeter
+// still rejects an individual load that would overrun the safety margin.
+func computeSlots(sizes []int64, availableBytes uint64, max int) int {
+	if max < 1 {
+		max = 1
+	}
+	sorted := make([]int64, len(sizes))
+	copy(sorted, sizes)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	var used uint64
+	count := 0
+	for _, sz := range sorted {
+		if sz <= 0 {
+			continue
+		}
+		if used+uint64(sz) > availableBytes {
+			break
+		}
+		used += uint64(sz)
+		count++
+	}
+	if count < 1 {
+		count = 1
+	}
+	if count > max {
+		count = max
+	}
+	return count
 }
 
 // --- Provider Abstraction ---
@@ -681,12 +798,7 @@ func ollamaTimeout() time.Duration {
 // abandoned request hold up every later one on a machine that can only run one
 // model at a time.
 func acquireSlot(ctx context.Context) bool {
-	select {
-	case inferenceSlots <- struct{}{}:
-		return true
-	case <-ctx.Done():
-		return false
-	}
+	return inferenceSlots.acquire(ctx)
 }
 
 // resolveMaxTokens caps output length via the max_budget provider param
@@ -747,9 +859,18 @@ var (
 	budgeter      *MemoryBudgeter
 	ollamaURL     string
 
-	// inferenceSlots serializes local inference so only one model is resident
-	// at a time; the memory budgeter can't stop two models loading concurrently.
-	inferenceSlots = make(chan struct{}, 1)
+	// inferenceSlots bounds concurrent local inference. Its limit is dynamic: the
+	// health poll recomputes it from free memory + the announced model sizes, so
+	// a host with headroom for several co-resident models can serve them without
+	// the eviction churn a hard single slot would force. The memory budgeter
+	// remains the per-request backstop that rejects when free RAM drops below the
+	// safety margin.
+	inferenceSlots = newSlotSemaphore(1)
+
+	// maxSlots caps the dynamic slot count so a host full of tiny models never
+	// announces unbounded concurrency. Overridden in main() from
+	// LATTICE_GATEWAY_MAX_SLOTS.
+	maxSlots = 3
 )
 
 // logQueuedCancel records a request whose client went away while it waited for
@@ -825,7 +946,7 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			res, committed, err := sp.ExecuteStream(r.Context(), upstreamReq, w)
-			<-inferenceSlots
+			inferenceSlots.release()
 
 			te := Telemetry{
 				RequestID:     req.Routing.RequestID,
@@ -854,7 +975,7 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := provider.Execute(r.Context(), upstreamReq)
-	<-inferenceSlots
+	inferenceSlots.release()
 
 	if err != nil {
 		logTelemetry(Telemetry{
@@ -929,7 +1050,7 @@ func handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	defer func() { <-inferenceSlots }()
+	defer inferenceSlots.release()
 
 	upstream, err := http.NewRequestWithContext(r.Context(), "POST",
 		ollamaURL+"/v1/embeddings", bytes.NewReader(bodyBytes))
@@ -1039,7 +1160,7 @@ func handleImage(w http.ResponseWriter, r *http.Request, op string) {
 		})
 		return
 	}
-	defer func() { <-inferenceSlots }()
+	defer inferenceSlots.release()
 
 	providerName, _ := resolveModel(img.Model)
 	providerMutex.RLock()
@@ -1123,7 +1244,7 @@ func handleSpeech(w http.ResponseWriter, r *http.Request, op string) {
 		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: "client_cancelled_while_queued"})
 		return
 	}
-	defer func() { <-inferenceSlots }()
+	defer inferenceSlots.release()
 
 	// The two ops decode different request shapes but share the resolve →
 	// type-assert → call skeleton. A model routed to a non-speech provider is a
@@ -1218,6 +1339,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	var tags struct {
 		Models []struct {
 			Name string `json:"name"`
+			Size int64  `json:"size"`
 		} `json:"models"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
@@ -1225,8 +1347,12 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tagNames := make([]string, 0, len(tags.Models))
+	sizes := make([]int64, 0, len(tags.Models))
 	for _, m := range tags.Models {
 		tagNames = append(tagNames, m.Name)
+		if m.Size > 0 {
+			sizes = append(sizes, m.Size)
+		}
 	}
 
 	caps := []string{"local", "chat", "embeddings", "tool_calling"}
@@ -1236,12 +1362,18 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		models = registry.announcedModels(tagNames)
 	}
 
+	// Recompute the concurrency ceiling from free memory and the announced model
+	// sizes, then apply it to the semaphore so the reported slot count and the
+	// actual enforcement always agree.
+	slots := computeSlots(sizes, budgeter.availableBytes(), maxSlots)
+	inferenceSlots.setLimit(slots)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":       "ok",
 		"max_context":  maxContext,
 		"capabilities": caps,
-		"slots":        cap(inferenceSlots),
+		"slots":        slots,
 		"models":       models,
 	})
 }
@@ -1265,6 +1397,12 @@ func newRouter() *http.ServeMux {
 func main() {
 	budgeter = NewMemoryBudgeter()
 	ollamaURL = latticeconfig.Env("LATTICE_OLLAMA_URL", "http://localhost:11434")
+
+	if v := latticeconfig.Env("LATTICE_GATEWAY_MAX_SLOTS", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxSlots = n
+		}
+	}
 
 	cfgPath := latticeconfig.Env("LATTICE_GATEWAY_PROVIDERS", "")
 	reg, provs, err := loadProviders(cfgPath)
