@@ -61,6 +61,7 @@ type Gateway struct {
 	CostPerToken float64  // cloud only
 	RateLimit    int      // cloud only, req/min
 	MaxContext   int      // announced context ceiling
+	Priority     int      // local only: routing preference, lower wins
 }
 
 // gatewayAnnouncement is the /health payload the gateway publishes.
@@ -102,10 +103,12 @@ func hostsModel(models []string, model string) bool {
 
 // selectGateway is the adequacy routing rule: filter on health (announced
 // gateways only), capability, model-hosting, and slot; then score cloud by
-// lowest cost and local by first match. Cloud gateways are wildcards — no
-// health poll, no hosting check, no slot — so their "adequacy" is cost and
-// rate-limit alone. It returns an error when nothing is adequate, so the
-// caller fails loudly rather than reroutes.
+// lowest cost and local by highest priority. Priority is the tiebreak when two
+// healthy gateways host the same model: the lower the Priority value, the more
+// preferred. Cloud gateways are wildcards — no health poll, no hosting check,
+// no slot — so their "adequacy" is cost and rate-limit alone. It returns an
+// error when nothing is adequate, so the caller fails loudly rather than
+// reroutes.
 func selectGateway(requiredCap, model string, registry map[string]Gateway, healthy map[string]bool) (Gateway, error) {
 	var best Gateway
 	bestCost := math.MaxFloat64
@@ -133,8 +136,12 @@ func selectGateway(requiredCap, model string, registry map[string]Gateway, healt
 				best = gw
 				found = true
 			}
-		} else {
-			return gw, nil
+		} else if !found || gw.Priority < best.Priority {
+			// First adequate local gateway, or one with a higher priority
+			// (lower Priority value). Deterministic: priority comes from
+			// declaration order, not map iteration order.
+			best = gw
+			found = true
 		}
 	}
 	if !found {
@@ -158,7 +165,6 @@ var (
 
 func init() {
 	ollamaURL := latticeconfig.Env("LATTICE_OLLAMA_URL", "http://localhost:11434")
-	gatewayURL := latticeconfig.Env("LATTICE_GATEWAY_URL", "http://localhost:8081")
 
 	gateways["ollama-cloud-primary"] = Gateway{
 		ID:           "ollama-cloud-primary",
@@ -174,11 +180,37 @@ func init() {
 		CostPerToken: 0.000005,
 		RateLimit:    10,
 	}
-	gateways["mac-gateway"] = Gateway{
-		ID:           "mac-gateway",
-		Endpoint:     gatewayURL,
-		Capabilities: []string{"local"},
+
+	// Local gateways are declared as an id=endpoint list; the health poll fills
+	// in each one's Models/Slots/MaxContext from its /health announcement. The
+	// default keeps the single-gateway deployment unchanged: LATTICE_GATEWAY_URL
+	// names the sole local host, registered as "mac-gateway".
+	localList := latticeconfig.Env("LATTICE_LOCAL_GATEWAYS",
+		"mac-gateway="+latticeconfig.Env("LATTICE_GATEWAY_URL", "http://localhost:8081"))
+	for _, gw := range parseLocalGatewayList(localList) {
+		gateways[gw.ID] = gw
 	}
+}
+
+// parseLocalGatewayList turns an "id=endpoint,id=endpoint" declaration into the
+// corresponding local Gateway entries. Malformed entries are skipped and logged
+// rather than failing the whole plane, so one bad line cannot take down routing.
+//
+// Declaration order is the routing priority: the first entry is preferred when
+// two gateways host the same model. This is how "M6 first, M1 fallback" is
+// expressed without a separate weight field in config.
+func parseLocalGatewayList(list string) []Gateway {
+	var out []Gateway
+	for i, entry := range strings.Split(list, ",") {
+		id, endpoint, ok := strings.Cut(strings.TrimSpace(entry), "=")
+		id, endpoint = strings.TrimSpace(id), strings.TrimSpace(endpoint)
+		if !ok || id == "" || endpoint == "" {
+			fmt.Printf("skipping malformed local gateway declaration %q\n", entry)
+			continue
+		}
+		out = append(out, Gateway{ID: id, Endpoint: endpoint, Capabilities: []string{"local"}, Priority: i})
+	}
+	return out
 }
 
 // localityFor reports which registry a target was chosen from. It is derived
@@ -636,18 +668,30 @@ func requiredCapability(privacy, latencyClass, model string) (string, error) {
 // that finds this stops concluding the API is absent, which is what happened
 // when the only route was the chat endpoint.
 func handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	type gwView struct {
+		ID           string
+		Capabilities []string
+		Slots        int
+		Models       []string
+		MaxContext   int
+	}
+
 	healthMutex.RLock()
+	// context_length is the ceiling every local gateway honours, so a client is
+	// never promised a context its model cannot serve.
 	ctxCap := 0
-	var models []string
-	var caps []string
-	slots := 0
-	if gw, ok := gateways["mac-gateway"]; ok {
-		ctxCap = gw.MaxContext
-		models = gw.Models
-		caps = gw.Capabilities
-		slots = gw.Slots
+	views := make([]gwView, 0)
+	for id, gw := range gateways {
+		if !hasCapability(gw.Capabilities, "local") && !hasCapability(gw.Capabilities, "tiny") {
+			continue
+		}
+		if ctxCap == 0 || gw.MaxContext < ctxCap {
+			ctxCap = gw.MaxContext
+		}
+		views = append(views, gwView{id, gw.Capabilities, gw.Slots, gw.Models, gw.MaxContext})
 	}
 	healthMutex.RUnlock()
+	sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
 
 	ids := make([]string, 0, len(capabilities))
 	for id := range capabilities {
@@ -664,15 +708,22 @@ func handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	gatewayList := make([]map[string]interface{}, 0, len(views))
+	for _, v := range views {
+		gatewayList = append(gatewayList, map[string]interface{}{
+			"id":           v.ID,
+			"capabilities": v.Capabilities,
+			"slots":        v.Slots,
+			"models":       v.Models,
+			"max_context":  v.MaxContext,
+		})
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"context_length": ctxCap,
 		"capabilities":   list,
-		"gateway": map[string]interface{}{
-			"capabilities": caps,
-			"slots":        slots,
-			"models":       models,
-		},
+		"gateways":       gatewayList,
 	})
 }
 

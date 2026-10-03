@@ -67,7 +67,8 @@ source. Defaults are shown; override in each process's environment (see §5).
 | variable | default | meaning |
 |---|---|---|
 | `LATTICE_CONTROL_ADDR` | `:8082` | listen address for `/route` and `/status` |
-| `LATTICE_GATEWAY_URL` | `http://localhost:8081` | where the gateway lives (set to the Mac's tailnet address) |
+| `LATTICE_LOCAL_GATEWAYS` | `mac-gateway=http://localhost:8081` | the local gateways to poll, as `id=endpoint` comma pairs (one per Mac that computes local inference) |
+| `LATTICE_GATEWAY_URL` | `http://localhost:8081` | single-gateway fallback when `LATTICE_LOCAL_GATEWAYS` is unset |
 | `LATTICE_OLLAMA_URL` | `http://localhost:11434` | the cloud Ollama endpoint on this host |
 | `LATTICE_GATEWAY_TELEMETRY_LOCAL` | `/var/log/lattice/telemetry-gateway.jsonl` | relay file for gateway telemetry pulled over HTTP |
 | `LATTICE_CONTROL_TELEMETRY` | `/var/log/lattice/telemetry-control.jsonl` | control plane telemetry sink |

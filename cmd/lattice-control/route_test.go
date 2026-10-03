@@ -347,3 +347,231 @@ func TestHandleRouteReportsLocalLocality(t *testing.T) {
 		t.Errorf("telemetry locality = %q, want local", got.Locality)
 	}
 }
+
+func TestParseLocalGatewayList(t *testing.T) {
+	cases := []struct {
+		name string
+		list string
+		want map[string]string // id -> endpoint
+	}{
+		{"single", "m1=http://a:8081", map[string]string{"m1": "http://a:8081"}},
+		{"two", "m1=http://a:8081,m6=http://b:8081", map[string]string{"m1": "http://a:8081", "m6": "http://b:8081"}},
+		{"trims whitespace", " m1 = http://a:8081 ", map[string]string{"m1": "http://a:8081"}},
+		{"skips malformed", "m1=http://a:8081,not-a-pair,,=http://x", map[string]string{"m1": "http://a:8081"}},
+		{"empty", "", map[string]string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseLocalGatewayList(tc.list)
+			if len(got) != len(tc.want) {
+				t.Fatalf("parsed %d gateways, want %d", len(got), len(tc.want))
+			}
+			for _, gw := range got {
+				if tc.want[gw.ID] != gw.Endpoint {
+					t.Errorf("gateway %q endpoint = %q, want %q", gw.ID, gw.Endpoint, tc.want[gw.ID])
+				}
+				if len(gw.Capabilities) != 1 || gw.Capabilities[0] != "local" {
+					t.Errorf("gateway %q capabilities = %v, want [local]", gw.ID, gw.Capabilities)
+				}
+			}
+		})
+	}
+}
+
+// Priority is declaration order: the first entry in the list is the routing
+// preference when two gateways host the same model. Asserting it here guards the
+// "M6 first, M1 fallback" tiebreak against a refactor that drops the index.
+func TestParseLocalGatewayListAssignsPriorityByOrder(t *testing.T) {
+	got := parseLocalGatewayList("m6=http://b:8081,m1=http://a:8081")
+	if len(got) != 2 {
+		t.Fatalf("parsed %d gateways, want 2", len(got))
+	}
+	prio := map[string]int{}
+	for _, gw := range got {
+		prio[gw.ID] = gw.Priority
+	}
+	if prio["m6"] != 0 || prio["m1"] != 1 {
+		t.Errorf("priority by declaration order = %v, want m6=0 m1=1", prio)
+	}
+}
+
+// When two local gateways both host a model (the overlapping set pulled onto the
+// M6), routing must prefer the higher-priority gateway — lower Priority value —
+// and do so deterministically regardless of map iteration order.
+func TestHandleRoutePrefersHigherPriorityGatewayForOverlappingModel(t *testing.T) {
+	old := telemetryPath
+	telemetryPath = t.TempDir() + "/telemetry-control.jsonl"
+	defer func() { telemetryPath = old }()
+
+	healthMutex.Lock()
+	oldHealthy := gatewayHealthy
+	gatewayHealthy = map[string]bool{"mac-gateway": true, "m6-gateway": true}
+	oldMac := gateways["mac-gateway"]
+	oldM6, hadM6 := gateways["m6-gateway"]
+	gateways["mac-gateway"] = Gateway{
+		ID:           "mac-gateway",
+		Endpoint:     "http://127.0.0.1:8081",
+		Capabilities: []string{"local", "chat"},
+		Models:       []string{"hermes3:8b"},
+		Slots:        1,
+		Priority:     1, // declared second: the fallback
+	}
+	gateways["m6-gateway"] = Gateway{
+		ID:           "m6-gateway",
+		Endpoint:     "http://192.168.0.22:8081",
+		Capabilities: []string{"local", "chat"},
+		Models:       []string{"hermes3:8b"},
+		Slots:        1,
+		Priority:     0, // declared first: preferred
+	}
+	healthMutex.Unlock()
+	defer func() {
+		healthMutex.Lock()
+		gatewayHealthy = oldHealthy
+		gateways["mac-gateway"] = oldMac
+		if hadM6 {
+			gateways["m6-gateway"] = oldM6
+		} else {
+			delete(gateways, "m6-gateway")
+		}
+		healthMutex.Unlock()
+	}()
+
+	body := `{"model":"hermes3:8b","messages":[],"routing":{"privacy":"LOCAL_ONLY","request_id":"req-overlap"}}`
+	rec := httptest.NewRecorder()
+	handleRoute(rec, httptest.NewRequest("POST", "/route", strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	var d Decision
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatalf("response is not a decision: %v", err)
+	}
+	if d.Target != "m6-gateway" {
+		t.Errorf("overlapping model routed to %q, want m6-gateway (higher priority)", d.Target)
+	}
+}
+
+// Two local gateways hosting disjoint models must route each model to the one
+// gateway that announces it — the "coexist" cutover. No scoring is involved:
+// only one gateway hosts a given model, so filter→score reduces to filter.
+func TestHandleRouteRoutesDisjointModelsAcrossGateways(t *testing.T) {
+	old := telemetryPath
+	telemetryPath = t.TempDir() + "/telemetry-control.jsonl"
+	defer func() { telemetryPath = old }()
+
+	healthMutex.Lock()
+	oldHealthy := gatewayHealthy
+	gatewayHealthy = map[string]bool{"mac-gateway": true, "m6-gateway": true}
+	oldMac := gateways["mac-gateway"]
+	oldM6, hadM6 := gateways["m6-gateway"]
+	gateways["mac-gateway"] = Gateway{
+		ID:           "mac-gateway",
+		Endpoint:     "http://127.0.0.1:8081",
+		Capabilities: []string{"local", "chat"},
+		Models:       []string{"granite3-moe:3b"},
+		Slots:        1,
+	}
+	gateways["m6-gateway"] = Gateway{
+		ID:           "m6-gateway",
+		Endpoint:     "http://192.168.0.22:8081",
+		Capabilities: []string{"local", "chat"},
+		Models:       []string{"gpt-oss:20b"},
+		Slots:        1,
+	}
+	healthMutex.Unlock()
+	defer func() {
+		healthMutex.Lock()
+		gatewayHealthy = oldHealthy
+		gateways["mac-gateway"] = oldMac
+		if hadM6 {
+			gateways["m6-gateway"] = oldM6
+		} else {
+			delete(gateways, "m6-gateway")
+		}
+		healthMutex.Unlock()
+	}()
+
+	cases := []struct {
+		model string
+		want  string
+	}{
+		{"granite3-moe:3b", "mac-gateway"},
+		{"gpt-oss:20b", "m6-gateway"},
+	}
+	for _, tc := range cases {
+		body := `{"model":"` + tc.model + `","messages":[],"routing":{"privacy":"LOCAL_ONLY","request_id":"req-` + tc.model + `"}}`
+		rec := httptest.NewRecorder()
+		handleRoute(rec, httptest.NewRequest("POST", "/route", strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("model %q: status = %d (%s)", tc.model, rec.Code, rec.Body.String())
+		}
+		var d Decision
+		if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+			t.Fatalf("model %q: %v", tc.model, err)
+		}
+		if d.Target != tc.want {
+			t.Errorf("model %q routed to %q, want %q", tc.model, d.Target, tc.want)
+		}
+	}
+}
+
+// /capabilities now reports every local gateway, not the single hardcoded one,
+// and context_length collapses to the tightest ceiling so no client is promised
+// context its model cannot serve.
+func TestHandleCapabilitiesListsGateways(t *testing.T) {
+	healthMutex.Lock()
+	oldMac := gateways["mac-gateway"]
+	oldM6, hadM6 := gateways["m6-gateway"]
+	gateways["mac-gateway"] = Gateway{
+		ID:           "mac-gateway",
+		Endpoint:     "http://127.0.0.1:8081",
+		Capabilities: []string{"local"},
+		Models:       []string{"granite3-moe:3b"},
+		Slots:        1,
+		MaxContext:   32768,
+	}
+	gateways["m6-gateway"] = Gateway{
+		ID:           "m6-gateway",
+		Endpoint:     "http://192.168.0.22:8081",
+		Capabilities: []string{"local"},
+		Models:       []string{"gpt-oss:20b"},
+		Slots:        1,
+		MaxContext:   65536,
+	}
+	healthMutex.Unlock()
+	defer func() {
+		healthMutex.Lock()
+		gateways["mac-gateway"] = oldMac
+		if hadM6 {
+			gateways["m6-gateway"] = oldM6
+		} else {
+			delete(gateways, "m6-gateway")
+		}
+		healthMutex.Unlock()
+	}()
+
+	rec := httptest.NewRecorder()
+	handleCapabilities(rec, httptest.NewRequest("GET", "/capabilities", nil))
+
+	var got struct {
+		ContextLength int `json:"context_length"`
+		Gateways      []struct {
+			ID         string `json:"id"`
+			MaxContext int    `json:"max_context"`
+		} `json:"gateways"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if got.ContextLength != 32768 {
+		t.Errorf("context_length = %d, want the tightest ceiling 32768", got.ContextLength)
+	}
+	if len(got.Gateways) != 2 {
+		t.Fatalf("reported %d gateways, want 2", len(got.Gateways))
+	}
+	if got.Gateways[0].ID != "m6-gateway" || got.Gateways[1].ID != "mac-gateway" {
+		t.Errorf("gateways not sorted by id: %+v", got.Gateways)
+	}
+}
