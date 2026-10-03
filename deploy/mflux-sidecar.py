@@ -36,7 +36,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-BIN = os.environ.get("MFLUX_BIN", os.path.expanduser("~/lattice-mflux/venv/bin/mflux-generate"))
+BIN = os.environ.get("MFLUX_BIN", os.path.expanduser("~/.local/bin/mflux-generate"))
 MODEL = os.environ.get("MFLUX_MODEL", "dev")
 LORA = os.environ.get("MFLUX_LORA", "")  # e.g. shauray/flux-uncensored-lora
 LORA_SCALE = os.environ.get("MFLUX_LORA_SCALE", "1.0")

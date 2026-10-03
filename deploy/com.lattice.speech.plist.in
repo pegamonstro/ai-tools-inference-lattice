@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lattice SPEECH sidecar — macOS LaunchAgent template.
+
+  The local speech backend (kokoro-mlx TTS + mlx-whisper STT) for the gateway's
+  "speech" provider. It is supervised here because it runs on the Mac (the only
+  MLX + unified-memory host), and it is a sidecar rather than a gateway provider
+  binary because speech is a different modality from the chat/embeddings surface
+  the gateway speaks — exactly as mflux is for images. See deploy/speech-sidecar.py.
+
+  install-macos.sh substitutes the placeholders and installs the result to
+  ~/Library/LaunchAgents/, the same username-free step as the gateway, mlx and
+  mflux agents. WHISPER_BIN must be the absolute path to the mlx_whisper uv-tool
+  shim (launchd has no login PATH). SPEECH_BIND is 127.0.0.1 because the gateway
+  — which proxies speech — runs on the same host and reaches the sidecar over
+  loopback (unlike mflux, which the Pi reaches over the tailnet, so it binds
+  0.0.0.0). The sidecar is unauthenticated on loopback by default.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lattice.speech</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__SPEECH_PYTHON__</string>
+        <string>__REPO_ROOT__/deploy/speech-sidecar.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__SPEECH_PATH__</string>
+        <key>WHISPER_BIN</key>
+        <string>__WHISPER_BIN__</string>
+        <key>WHISPER_MODEL</key>
+        <string>mlx-community/whisper-small-mlx</string>
+        <key>SPEECH_VOICE</key>
+        <string>af_heart</string>
+        <key>SPEECH_BIND</key>
+        <string>127.0.0.1</string>
+        <key>SPEECH_PORT</key>
+        <string>8900</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/lattice-speech.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/lattice-speech.err.log</string>
+</dict>
+</plist>

@@ -6,6 +6,10 @@ __pycache__/
 /lattice-frontend
 /lattice-cli
 /lattice-stats
+# Binaries left behind when `go build ./cmd/...` is run from the repo root.
+/cmd/*/lattice-control
+/cmd/*/lattice-gateway
+/cmd/*/lattice-frontend
 *.jsonl
 *.py
 # Deployment artifacts are Python but must ship: the mflux image-gen sidecar and

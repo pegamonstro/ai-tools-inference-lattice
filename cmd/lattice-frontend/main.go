@@ -192,6 +192,19 @@ func handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	proxyInference(w, r, "/v1/images/edits", false)
 }
 
+// handleAudioTranscriptions and handleAudioSpeech share the chat flow — parse,
+// ask control, proxy — and differ in exactly two ways: the upstream path, and the
+// absence of a routing envelope (a speech body is not the chat translation
+// layer's contract). The speech model's untagged name routes local through
+// control's existing rule, exactly as embeddings and images do.
+func handleAudioTranscriptions(w http.ResponseWriter, r *http.Request) {
+	proxyInference(w, r, "/v1/audio/transcriptions", false)
+}
+
+func handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
+	proxyInference(w, r, "/v1/audio/speech", false)
+}
+
 func proxyInference(w http.ResponseWriter, r *http.Request, upstreamPath string, injectRouting bool) {
 	tTotalStart := time.Now()
 
@@ -309,6 +322,8 @@ func newRouter() *http.ServeMux {
 	mux.HandleFunc("/v1/embeddings", handleEmbeddings)
 	mux.HandleFunc("/v1/images/generations", handleImageGenerations)
 	mux.HandleFunc("/v1/images/edits", handleImageEdits)
+	mux.HandleFunc("/v1/audio/transcriptions", handleAudioTranscriptions)
+	mux.HandleFunc("/v1/audio/speech", handleAudioSpeech)
 	mux.HandleFunc("/v1/models", handleModels)
 	mux.HandleFunc("/health", handleHealth)
 	return mux

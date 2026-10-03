@@ -106,6 +106,35 @@ type ImageDataItem struct {
 	B64JSON string `json:"b64_json"`
 }
 
+// TranscriptionRequest is the OpenAI /v1/audio/transcriptions request, adapted to
+// the lattice's JSON proxy: the audio rides as base64 in `file` (the Mac cannot
+// read the Pi's filesystem, so bytes must ride the request, exactly like images).
+type TranscriptionRequest struct {
+	Model    string `json:"model"`
+	File     string `json:"file"`
+	Language string `json:"language"`
+}
+
+type TranscriptionResponse struct {
+	Text string `json:"text"`
+}
+
+// SynthesisRequest is the OpenAI /v1/audio/speech request. Input carries the text
+// to speak; Voice selects the kokoro voice, defaulting in the sidecar. Format is
+// carried but the sidecar returns WAV only.
+type SynthesisRequest struct {
+	Model  string `json:"model"`
+	Input  string `json:"input"`
+	Voice  string `json:"voice"`
+	Format string `json:"response_format"`
+}
+
+type SynthesisResponse struct {
+	Audio      string `json:"audio"`
+	Format     string `json:"format"`
+	SampleRate int    `json:"sample_rate"`
+}
+
 // Telemetry is one JSONL line per inference request, written to disk for the
 // Bee-terminal feeder to tail and relay to the log screen.
 type Telemetry struct {
@@ -1051,6 +1080,124 @@ func handleImage(w http.ResponseWriter, r *http.Request, op string) {
 	json.NewEncoder(w).Encode(res)
 }
 
+// defaultTranscriptionModel and defaultSynthesisModel are the Lattice aliases for
+// the speech models. A speech request that omits model gets these rather than
+// failing on an empty name, mirroring defaultImageModel.
+const (
+	defaultTranscriptionModel = "whisper-small"
+	defaultSynthesisModel     = "kokoro-82m"
+)
+
+func handleAudioTranscriptions(w http.ResponseWriter, r *http.Request) {
+	handleSpeech(w, r, "transcribe")
+}
+
+func handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
+	handleSpeech(w, r, "synthesize")
+}
+
+// handleSpeech mirrors handleEmbeddings/handleImage: the same single slot, the
+// same telemetry-on-every-exit discipline, but against the speech provider. The
+// id rides the X-Request-Id header, exactly as an embedding's does — a speech
+// body carries no routing envelope. Speech models are small, so they use the chat
+// memory margin rather than the image margin.
+func handleSpeech(w http.ResponseWriter, r *http.Request, op string) {
+	t0 := time.Now()
+	requestID := r.Header.Get("X-Request-Id")
+
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if !budgeter.CanAccommodate() {
+		fmt.Println("  Memory pressure: available RAM below safety margin. Rejecting speech request.")
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: "memory_pressure"})
+		http.Error(w, "Local memory pressure: available RAM below safety margin", http.StatusTooManyRequests)
+		return
+	}
+
+	if !acquireSlot(r.Context()) {
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: "client_cancelled_while_queued"})
+		return
+	}
+	defer func() { <-inferenceSlots }()
+
+	// The two ops decode different request shapes but share the resolve →
+	// type-assert → call skeleton. A model routed to a non-speech provider is a
+	// config fault and fails loudly, never re-homed to Ollama.
+	if op == "synthesize" {
+		var req SynthesisRequest
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
+			logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Model == "" {
+			req.Model = defaultSynthesisModel
+		}
+		sp, providerName, ok := speechCapability(req.Model)
+		if !ok {
+			logTelemetry(Telemetry{RequestID: requestID, Model: req.Model, Elapsed: time.Since(t0).Seconds(), Error: fmt.Sprintf("provider %q is not a speech provider", providerName)})
+			http.Error(w, "Provider is not a speech provider", http.StatusInternalServerError)
+			return
+		}
+		res, err := sp.Synthesize(r.Context(), req)
+		te := Telemetry{RequestID: requestID, Model: req.Model, Elapsed: time.Since(t0).Seconds()}
+		if err != nil {
+			te.Error = err.Error()
+			logTelemetry(te)
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		logTelemetry(te)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(res)
+		return
+	}
+
+	var req TranscriptionRequest
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Model == "" {
+		req.Model = defaultTranscriptionModel
+	}
+	sp, providerName, ok := speechCapability(req.Model)
+	if !ok {
+		logTelemetry(Telemetry{RequestID: requestID, Model: req.Model, Elapsed: time.Since(t0).Seconds(), Error: fmt.Sprintf("provider %q is not a speech provider", providerName)})
+		http.Error(w, "Provider is not a speech provider", http.StatusInternalServerError)
+		return
+	}
+	res, err := sp.Transcribe(r.Context(), req)
+	te := Telemetry{RequestID: requestID, Model: req.Model, Elapsed: time.Since(t0).Seconds()}
+	if err != nil {
+		te.Error = err.Error()
+		logTelemetry(te)
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	logTelemetry(te)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
+}
+
+// speechCapability resolves a speech model name to its provider and asserts it
+// implements the SpeechCapability interface. ok is false when the resolved
+// provider is not a speech provider.
+func speechCapability(model string) (SpeechCapability, string, bool) {
+	providerName, _ := resolveModel(model)
+	providerMutex.RLock()
+	provider := providers[providerName]
+	providerMutex.RUnlock()
+	sp, ok := provider.(SpeechCapability)
+	return sp, providerName, ok
+}
+
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !budgeter.CanAccommodate() {
 		http.Error(w, "Memory pressure high", http.StatusServiceUnavailable)
@@ -1108,6 +1255,8 @@ func newRouter() *http.ServeMux {
 	mux.HandleFunc("/v1/embeddings", handleEmbeddings)
 	mux.HandleFunc("/v1/images/generations", handleImageGenerations)
 	mux.HandleFunc("/v1/images/edits", handleImageEdits)
+	mux.HandleFunc("/v1/audio/transcriptions", handleAudioTranscriptions)
+	mux.HandleFunc("/v1/audio/speech", handleAudioSpeech)
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/telemetry", handleTelemetry)
 	return mux

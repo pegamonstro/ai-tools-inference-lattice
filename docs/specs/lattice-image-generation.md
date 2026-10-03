@@ -5,6 +5,18 @@
 `deploy/hermes/plugins/image_gen/mflux/`, `deploy/install-macos.sh`
 **Depends on:** nothing in the chat/embeddings surface — this is a new modality.
 
+> **M6 cutover note (2026-10-03).** This spec was written against the M1 (16 GB,
+> FLUX.1-dev + Lustly LoRA, a manual `~/lattice-mflux/venv`). On the M6 the runtime
+> moved to a `uv tool`: the sidecar is stdlib-only and runs under `/usr/bin/python3`,
+> `mflux-generate` is the shim at `~/.local/bin/mflux-generate`, and the baked model
+> is `mflux-save --model schnell --quantize 4 --path ~/mflux-models/flux-schnell-4bit`
+> (schnell is 4-step and Apache-2.0, not the gated non-commercial dev). The stale
+> `~/lattice-mflux/venv` path and `flux-dev-4bit` bake referenced below no longer exist;
+> the corrected values are in `deploy/install-macos.sh` and
+> `deploy/com.lattice.mflux.plist.in`. On the M6 "uncensored" means **schnell +
+> Lustly LoRA** (`--lora shauray/flux-uncensored-lora`, applied at inference, not
+> baked), registry name `flux-uncensored`; dev + Lustly is the fallback (see §11).
+
 ---
 
 ## 1. Purpose
@@ -255,3 +267,14 @@ The model is uncensored and the endpoint is image-generation — worth being exp
 - **Resident-model backend** — replace the per-request subprocess with a persistent
   mflux process behind `run_generation()`, removing the reload cost, once the mflux
   Python API is mapped against a real generation.
+- **Uncensored model selection (resolved 2026-10-03).** The M6 serves **schnell +
+  Lustly LoRA** as `flux-uncensored`: the baked 4-bit schnell
+  (`~/mflux-models/flux-schnell-4bit`, Apache-2.0, 4-step) with
+  `shauray/flux-uncensored-lora` applied at inference via `--lora … --no-bake-lora`.
+  `--no-bake-lora` is load-bearing: the default `--bake-lora` merges the LoRA into
+  fp16 (~47 GB) and OOMs even 32 GB. The LoRA is dev-trained; dev and schnell share a
+  FLUX.1 architecture so it applies, but the uncensoring effect is calibrated for
+  dev's weights and may be weaker on the 4-step distilled schnell — **dev + Lustly
+  is the fallback** (`flux-dev`, currently on the M1) if schnell+Lustly underperforms.
+  First-run 512² 4-step measured ~28 s (LoRA download + load + steps). See the M6
+  benchmark log (`m6-server/benchmarks.md`, round 4).

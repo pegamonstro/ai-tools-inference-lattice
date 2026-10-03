@@ -534,9 +534,109 @@ func TestHandleImageForwardsWithoutARoutingEnvelope(t *testing.T) {
 	}
 }
 
+// Speech is not a chat. Both audio routes must forward to their upstream path,
+// the client's own body must arrive intact, and no routing envelope may be
+// injected — that object is the chat translation layer's contract. The id rides a
+// header, so the gateway's own line stays keyed.
+func TestHandleAudioForwardsWithoutARoutingEnvelope(t *testing.T) {
+	cases := []struct {
+		name     string
+		handler  func(http.ResponseWriter, *http.Request)
+		path     string
+		model    string
+		body     string
+		checkKey string
+		checkVal interface{}
+	}{
+		{
+			name:     "transcriptions",
+			handler:  handleAudioTranscriptions,
+			path:     "/v1/audio/transcriptions",
+			model:    "whisper-small",
+			body:     `{"model":"whisper-small","file":"YXVkaW8="}`,
+			checkKey: "file",
+			checkVal: "YXVkaW8=",
+		},
+		{
+			name:     "speech",
+			handler:  handleAudioSpeech,
+			path:     "/v1/audio/speech",
+			model:    "kokoro-82m",
+			body:     `{"model":"kokoro-82m","input":"hello world","voice":"af_heart"}`,
+			checkKey: "input",
+			checkVal: "hello world",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var sawPath string
+			var sawBody map[string]interface{}
+			var sawHeader string
+
+			var target *httptest.Server
+			control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(Decision{
+					Target:    "mac-gateway",
+					Locality:  "local",
+					Endpoint:  target.URL,
+					ModelName: tc.model,
+				})
+			}))
+			defer control.Close()
+
+			target = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				sawPath = r.URL.Path
+				sawHeader = r.Header.Get("X-Request-Id")
+				json.NewDecoder(r.Body).Decode(&sawBody)
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{}`))
+			}))
+			defer target.Close()
+
+			oldControl, oldTelemetry := controlURL, telemetryPath
+			controlURL = control.URL
+			telemetryPath = t.TempDir() + "/telemetry-frontend.jsonl"
+			defer func() { controlURL, telemetryPath = oldControl, oldTelemetry }()
+
+			rec := httptest.NewRecorder()
+			tc.handler(rec, httptest.NewRequest("POST", tc.path, strings.NewReader(tc.body)))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+			}
+			if sawPath != tc.path {
+				t.Errorf("upstream path = %q, want %q", sawPath, tc.path)
+			}
+			if sawBody[tc.checkKey] != tc.checkVal {
+				t.Errorf("%s did not arrive intact: %v", tc.checkKey, sawBody[tc.checkKey])
+			}
+			if _, ok := sawBody["routing"]; ok {
+				t.Errorf("a routing envelope reached the audio path: %v", sawBody["routing"])
+			}
+
+			logged, err := os.ReadFile(telemetryPath)
+			if err != nil {
+				t.Fatalf("no frontend telemetry line: %v", err)
+			}
+			var line Telemetry
+			if err := json.Unmarshal(bytes.TrimSpace(logged), &line); err != nil {
+				t.Fatalf("frontend telemetry is not one JSON line: %v (%s)", err, logged)
+			}
+			if sawHeader != line.RequestID {
+				t.Errorf("X-Request-Id = %q, want %q — the gateway's line would be unkeyed",
+					sawHeader, line.RequestID)
+			}
+			if line.Locality != "local" {
+				t.Errorf("frontend locality = %q, want local", line.Locality)
+			}
+		})
+	}
+}
+
 func TestRouterServesEveryClientFacingRoute(t *testing.T) {
 	mux := newRouter()
-	for _, path := range []string{"/v1/chat/completions", "/v1/embeddings", "/v1/images/generations", "/v1/images/edits", "/v1/models", "/health"} {
+	for _, path := range []string{"/v1/chat/completions", "/v1/embeddings", "/v1/images/generations", "/v1/images/edits", "/v1/audio/transcriptions", "/v1/audio/speech", "/v1/models", "/health"} {
 		if _, pattern := mux.Handler(httptest.NewRequest("POST", path, nil)); pattern != path {
 			t.Errorf("%s is served as %q — an unregistered route is a 404 to the client", path, pattern)
 		}

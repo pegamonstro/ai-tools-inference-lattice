@@ -13,8 +13,16 @@
   ~/Library/LaunchAgents/, the same username-free substitution step as the gateway
   and mlx agents. MFLUX_MODEL points at the baked 4-bit model (mflux-save output,
   see the spec), so MFLUX_QUANTIZE is empty and MFLUX_EXTRA_ARGS carries the
-  --base-model / --no-bake-lora / --low-ram flags the bake requires. MFLUX_BIND
-  must be 0.0.0.0 so the Pi can reach it over the tailnet; the sidecar is
+  --base-model schnell flag the bake requires, plus --no-bake-lora (the default
+  --bake-lora merges the LoRA into fp16 and OOMs even 32 GB) and --vae-tiling (a
+  full-res 1024² VAE decode OOMs the Metal command buffer without it — see the M6
+  benchmark notes). MFLUX_LORA is the Lustly.ai uncensored LoRA; it is applied at
+  inference time, not baked. Note the LoRA is dev-trained but FLUX.1-dev and
+  -schnell share an architecture, so it applies to schnell too — the uncensoring
+  effect is weaker/less faithful on the distilled model, and dev is the fallback.
+  MFLUX_BIN is the uv-tool shim that runs mflux-generate (the sidecar itself is
+  stdlib Python and shells out to it).
+  MFLUX_BIND must be 0.0.0.0 so the Pi can reach it over the tailnet; the sidecar is
   unauthenticated (see the spec §Security).
 -->
 <plist version="1.0">
@@ -30,6 +38,8 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <key>MFLUX_BIN</key>
+        <string>__MFLUX_BIN__</string>
         <key>MFLUX_MODEL</key>
         <string>__MFLUX_MODEL__</string>
         <key>MFLUX_LORA</key>
@@ -43,7 +53,7 @@
         <key>MFLUX_PORT</key>
         <string>8899</string>
         <key>MFLUX_EXTRA_ARGS</key>
-        <string>--base-model dev --no-bake-lora --low-ram</string>
+        <string>--base-model schnell --no-bake-lora --vae-tiling</string>
     </dict>
 
     <key>RunAtLoad</key>

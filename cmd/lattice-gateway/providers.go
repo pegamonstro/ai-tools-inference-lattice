@@ -106,6 +106,8 @@ func loadProviders(cfgPath string) (*providerRegistry, map[string]Provider, erro
 			provs[p.Name] = &MLXProvider{Endpoint: p.Endpoint}
 		case "mflux":
 			provs[p.Name] = &MfluxProvider{Endpoint: p.Endpoint}
+		case "speech":
+			provs[p.Name] = &SpeechProvider{Endpoint: p.Endpoint}
 		default:
 			return nil, nil, fmt.Errorf("provider %q has unknown kind %q", p.Name, p.Kind)
 		}
@@ -178,6 +180,9 @@ func (reg *providerRegistry) announcedCapabilities() []string {
 			add("tool_calling")
 		case "mflux":
 			add("image_generation")
+		case "speech":
+			add("speech_recognition")
+			add("speech_synthesis")
 		}
 	}
 	return caps
@@ -539,4 +544,95 @@ func parseImageSize(size string) (int, int, error) {
 		return 0, 0, fmt.Errorf("invalid size %q: want WxH", size)
 	}
 	return w, h, nil
+}
+
+// speechTimeout is the gateway→sidecar client timeout for a speech call. It is
+// generous because a transcription of long audio can outlast any chat budget; the
+// sidecar's own subprocess timeout is 600 s, and the client must outlast it.
+func speechTimeout() time.Duration {
+	if v := latticeconfig.Env("LATTICE_GATEWAY_SPEECH_TIMEOUT", ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 15 * time.Minute
+}
+
+// SpeechCapability is implemented by providers that transcribe or synthesize
+// speech. handleTranscriptions/handleSpeech type-assert to it, exactly as
+// handleImage asserts to ImageProvider: a request that names a provider without
+// the capability fails loudly rather than being silently proxied to a chat
+// endpoint that does not exist.
+type SpeechCapability interface {
+	Transcribe(ctx context.Context, req TranscriptionRequest) (*TranscriptionResponse, error)
+	Synthesize(ctx context.Context, req SynthesisRequest) (*SynthesisResponse, error)
+}
+
+// SpeechProvider is an HTTP client for the speech sidecar
+// (deploy/speech-sidecar.py), which serves kokoro-mlx TTS and mlx-whisper STT.
+// It is speech-only: Execute fails loudly, because a chat request naming a speech
+// model is a routing fault that must not be silently re-homed to Ollama.
+type SpeechProvider struct {
+	Endpoint string
+}
+
+func (p *SpeechProvider) Name() string { return "speech" }
+
+// Execute exists only to satisfy Provider. A chat request that names the speech
+// model reaches here and must fail loudly rather than be silently dropped.
+func (p *SpeechProvider) Execute(ctx context.Context, req Request) (*Response, error) {
+	return nil, fmt.Errorf("speech is a speech provider, not a chat provider")
+}
+
+func (p *SpeechProvider) Transcribe(ctx context.Context, req TranscriptionRequest) (*TranscriptionResponse, error) {
+	var out TranscriptionResponse
+	// The sidecar's /transcribe names its base64 audio field "audio"; the gateway
+	// exposes the OpenAI-style "file" to clients, so translate at the boundary.
+	// (Synthesis needs no such step: the sidecar accepts "input" as an alias.)
+	if err := p.post(ctx, "/transcribe", map[string]string{"audio": req.File}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (p *SpeechProvider) Synthesize(ctx context.Context, req SynthesisRequest) (*SynthesisResponse, error) {
+	var out SynthesisResponse
+	if err := p.post(ctx, "/synthesize", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// post is the shared POST to the sidecar: marshal the request, decode the
+// response or the sidecar's {"error": ...} envelope into an error.
+func (p *SpeechProvider) post(ctx context.Context, path string, in, out interface{}) error {
+	b, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.Endpoint+path, bytes.NewBuffer(b))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: speechTimeout()}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var e struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&e)
+		msg := e.Error
+		if msg == "" {
+			msg = fmt.Sprintf("speech sidecar status %d", resp.StatusCode)
+		}
+		return fmt.Errorf("speech: %s", msg)
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
 }

@@ -105,19 +105,27 @@ else
 fi
 
 # The MFLUX sidecar — the local image-generation backend for the Hermes "mflux"
-# image_gen plugin. It is optional and, like the MLX server, only supervised when
-# its venv (a username-path that must not be committed) is present. The sidecar is
-# not a gateway provider: image generation is a different modality from the
+# image_gen plugin. It is optional and only supervised when the mflux CLI (a uv
+# tool shim, a username-path that must not be committed) is present. The sidecar
+# is not a gateway provider: image generation is a different modality from the
 # chat/embeddings surface the gateway speaks.
+#
+# mflux is installed as a `uv tool` (not a venv), so two things changed from the
+# original spec: the sidecar interpreter is the system Python (mflux-sidecar.py is
+# stdlib-only — it shells out to the CLI, it does not import mflux), and the
+# mflux-generate binary is the uv shim in ~/.local/bin.
 MFLUX_LABEL="com.lattice.mflux"
 MFLUX_TEMPLATE="$REPO_ROOT/deploy/$MFLUX_LABEL.plist.in"
-MFLUX_PYTHON="$HOME/lattice-mflux/venv/bin/python"
-# The 4-bit model baked by `mflux-save --model dev --quantize 4` (see the spec).
-# It is the username-path that must not be committed, like the venv above.
-MFLUX_MODEL="$HOME/lattice-mflux/models/flux-dev-4bit"
+MFLUX_PYTHON="/usr/bin/python3"
+MFLUX_BIN="$HOME/.local/bin/mflux-generate"
+# The 4-bit model baked by `mflux-save --model schnell --quantize 4` (see the spec
+# and the M6 cutover notes). A username-path that must not be committed. The
+# uncensored Lustly LoRA (shauray/flux-uncensored-lora) is set in the plist
+# template's MFLUX_LORA and applied at inference time, not baked.
+MFLUX_MODEL="$HOME/mflux-models/flux-schnell-4bit"
 MFLUX_DEST="$HOME/Library/LaunchAgents/$MFLUX_LABEL.plist"
 
-if [[ -x "$MFLUX_PYTHON" ]]; then
+if [[ -x "$MFLUX_BIN" ]]; then
   launchctl bootout "$DOMAIN/$MFLUX_LABEL" 2>/dev/null || true
   busy="$(lsof -nP -iTCP:8899 -sTCP:LISTEN -t 2>/dev/null || true)"
   if [[ -n "$busy" ]]; then
@@ -130,7 +138,7 @@ if [[ -x "$MFLUX_PYTHON" ]]; then
       fi
     done
   fi
-  sed -e "s|__MFLUX_PYTHON__|$MFLUX_PYTHON|g" -e "s|__MFLUX_MODEL__|$MFLUX_MODEL|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
+  sed -e "s|__MFLUX_PYTHON__|$MFLUX_PYTHON|g" -e "s|__MFLUX_BIN__|$MFLUX_BIN|g" -e "s|__MFLUX_MODEL__|$MFLUX_MODEL|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
     "$MFLUX_TEMPLATE" >"$MFLUX_DEST"
   launchctl bootstrap "$DOMAIN" "$MFLUX_DEST"
   if launchctl print "$DOMAIN/$MFLUX_LABEL" >/dev/null 2>&1; then
@@ -141,5 +149,46 @@ if [[ -x "$MFLUX_PYTHON" ]]; then
     echo "warning: mflux bootstrap failed — check $LOG_DIR/lattice-mflux.err.log" >&2
   fi
 else
-  echo "note: mflux venv not found at $MFLUX_PYTHON — skipping the mflux sidecar."
+  echo "note: mflux-generate not found at $MFLUX_BIN — skipping the mflux sidecar."
+fi
+
+# The SPEECH sidecar — the local kokoro-mlx (TTS) + mlx-whisper (STT) backend for
+# the gateway's "speech" provider. Like mflux it is optional and only supervised
+# when its venv (a username-path that must not be committed) is present. It binds
+# loopback only: the gateway, which proxies speech, runs on this same host.
+SPEECH_LABEL="com.lattice.speech"
+SPEECH_TEMPLATE="$REPO_ROOT/deploy/$SPEECH_LABEL.plist.in"
+SPEECH_PYTHON="$HOME/lattice-speech/.venv/bin/python"
+WHISPER_BIN="$HOME/.local/bin/mlx_whisper"
+SPEECH_DEST="$HOME/Library/LaunchAgents/$SPEECH_LABEL.plist"
+
+if [[ -x "$SPEECH_PYTHON" ]]; then
+  launchctl bootout "$DOMAIN/$SPEECH_LABEL" 2>/dev/null || true
+  busy="$(lsof -nP -iTCP:8900 -sTCP:LISTEN -t 2>/dev/null || true)"
+  if [[ -n "$busy" ]]; then
+    for pid in $busy; do
+      if [[ "$(ps -o command= -p "$pid" 2>/dev/null)" == *speech-sidecar.py* ]]; then
+        echo "error: an unmanaged speech sidecar (pid $pid) is holding :8900." >&2
+        echo "stop it, then re-run this script:" >&2
+        echo "  kill $pid" >&2
+        exit 1
+      fi
+    done
+  fi
+  # ffmpeg lives in ~/bin (an imageio-ffmpeg symlink) and mlx_whisper shells out
+  # to it for audio loading; launchd's default PATH omits it, so it must be in the
+  # agent's environment or transcription silently produces no output.
+  SPEECH_PATH="$HOME/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  sed -e "s|__SPEECH_PYTHON__|$SPEECH_PYTHON|g" -e "s|__SPEECH_PATH__|$SPEECH_PATH|g" -e "s|__WHISPER_BIN__|$WHISPER_BIN|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
+    "$SPEECH_TEMPLATE" >"$SPEECH_DEST"
+  launchctl bootstrap "$DOMAIN" "$SPEECH_DEST"
+  if launchctl print "$DOMAIN/$SPEECH_LABEL" >/dev/null 2>&1; then
+    echo "installed: $SPEECH_DEST"
+    echo "running  : $DOMAIN/$SPEECH_LABEL"
+    echo "logs     : $LOG_DIR/lattice-speech.{out,err}.log"
+  else
+    echo "warning: speech bootstrap failed — check $LOG_DIR/lattice-speech.err.log" >&2
+  fi
+else
+  echo "note: speech venv not found at $SPEECH_PYTHON — skipping the speech sidecar."
 fi
