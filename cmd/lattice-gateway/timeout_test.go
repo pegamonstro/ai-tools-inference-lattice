@@ -48,14 +48,16 @@ func TestAcquireSlotYieldsToCancelledContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if acquireSlot(ctx) {
+	granted, _ = acquireSlot(ctx, 1)
+	if granted {
 		inferenceSlots.release()
 		t.Fatal("acquireSlot took the slot for a cancelled caller")
 	}
 
 	// Free the slot and confirm a live caller still gets it.
 	inferenceSlots.release()
-	if !acquireSlot(context.Background()) {
+	granted, _ = acquireSlot(context.Background(), 1)
+	if !granted {
 		t.Fatal("acquireSlot refused a live caller with a free slot")
 	}
 	inferenceSlots.release()

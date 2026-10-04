@@ -166,6 +166,15 @@ func TestPrioritySemaphoreQueueFull(t *testing.T) {
 	}
 }
 
+func TestPriorityFor(t *testing.T) {
+	cases := map[string]int{"interactive": 0, "default": 1, "batch": 2, "": 1, "bogus": 1}
+	for in, want := range cases {
+		if got := priorityFor(in); got != want {
+			t.Fatalf("priorityFor(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
 func TestPrioritySemaphoreWaiting(t *testing.T) {
 	s := newPrioritySemaphore(1, 0.0)
 	s.acquire(context.Background(), 1)

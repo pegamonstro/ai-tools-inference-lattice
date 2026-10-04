@@ -863,9 +863,23 @@ func agingWeight() float64 {
 // caller gave up while queued. Blocking forever on the slot would let an
 // abandoned request hold up every later one on a machine that can only run one
 // model at a time.
-func acquireSlot(ctx context.Context) bool {
-	granted, _ := inferenceSlots.acquire(ctx, 1)
-	return granted
+func acquireSlot(ctx context.Context, priority int) (bool, error) {
+	return inferenceSlots.acquire(ctx, priority)
+}
+
+func priorityFor(latencyClass string) int {
+	switch latencyClass {
+	case "interactive":
+		return 0
+	case "batch":
+		return 2
+	default:
+		return 1
+	}
+}
+
+func headerPriority(r *http.Request) int {
+	return priorityFor(r.Header.Get("X-Priority"))
 }
 
 // resolveMaxTokens caps output length via the max_budget provider param
@@ -1008,7 +1022,13 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 	// chat clients stream by default and would otherwise render an empty reply.
 	if req.Stream {
 		if sp, ok := provider.(StreamingProvider); ok {
-			if !acquireSlot(r.Context()) {
+			granted, err := acquireSlot(r.Context(), priorityFor(req.Routing.LatencyClass))
+			if err == errQueueFull {
+				logTelemetry(Telemetry{RequestID: req.Routing.RequestID, Model: req.Model, ContextWindow: ctxWindow, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"})
+				http.Error(w, "Inference queue full; retry later", http.StatusTooManyRequests)
+				return
+			}
+			if !granted {
 				logQueuedCancel(req, ctxWindow, t0)
 				return
 			}
@@ -1037,7 +1057,13 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !acquireSlot(r.Context()) {
+	granted, err := acquireSlot(r.Context(), priorityFor(req.Routing.LatencyClass))
+	if err == errQueueFull {
+		logTelemetry(Telemetry{RequestID: req.Routing.RequestID, Model: req.Model, ContextWindow: ctxWindow, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"})
+		http.Error(w, "Inference queue full; retry later", http.StatusTooManyRequests)
+		return
+	}
+	if !granted {
 		logQueuedCancel(req, ctxWindow, t0)
 		return
 	}
@@ -1109,7 +1135,13 @@ func handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	// The same single slot chat takes, for the same reason: with one model
 	// resident, a concurrent embed evicts the resident chat model — which is the
 	// swap pressure this project has already paid for once.
-	if !acquireSlot(r.Context()) {
+	granted, err := acquireSlot(r.Context(), headerPriority(r))
+	if err == errQueueFull {
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"})
+		http.Error(w, "Inference queue full; retry later", http.StatusTooManyRequests)
+		return
+	}
+	if !granted {
 		logTelemetry(Telemetry{
 			RequestID: requestID,
 			Elapsed:   time.Since(t0).Seconds(),
@@ -1218,7 +1250,13 @@ func handleImage(w http.ResponseWriter, r *http.Request, op string) {
 		return
 	}
 
-	if !acquireSlot(r.Context()) {
+	granted, err := acquireSlot(r.Context(), headerPriority(r))
+	if err == errQueueFull {
+		logTelemetry(Telemetry{RequestID: requestID, Model: img.Model, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"})
+		http.Error(w, "Inference queue full; retry later", http.StatusTooManyRequests)
+		return
+	}
+	if !granted {
 		logTelemetry(Telemetry{
 			RequestID: requestID,
 			Model:     img.Model,
@@ -1307,7 +1345,13 @@ func handleSpeech(w http.ResponseWriter, r *http.Request, op string) {
 		return
 	}
 
-	if !acquireSlot(r.Context()) {
+	granted, err := acquireSlot(r.Context(), headerPriority(r))
+	if err == errQueueFull {
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"})
+		http.Error(w, "Inference queue full; retry later", http.StatusTooManyRequests)
+		return
+	}
+	if !granted {
 		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: "client_cancelled_while_queued"})
 		return
 	}
