@@ -8,6 +8,7 @@ import (
 
 func TestMetricsEndpoint(t *testing.T) {
 	metrics.observe(Telemetry{Model: "flux-dev", Elapsed: 1.5})
+	metrics.observe(Telemetry{Model: "flux-dev", Elapsed: 0.25, Error: "memory_pressure"})
 	rr := httptest.NewRecorder()
 	handleMetrics(rr, httptest.NewRequest("GET", "/metrics", nil))
 	body := rr.Body.String()
@@ -16,6 +17,8 @@ func TestMetricsEndpoint(t *testing.T) {
 		"lattice_gateway_request_duration_seconds",
 		"lattice_gateway_queue_depth",
 		"lattice_gateway_slots_limit",
+		"lattice_gateway_errors_total",
+		`lattice_gateway_errors_total{reason="memory_pressure"}`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/metrics missing %q", want)

@@ -52,6 +52,10 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "lattice_gateway_request_duration_seconds_sum %f\n", m.durationSum)
 		fmt.Fprintf(w, "lattice_gateway_request_duration_seconds_count %d\n", m.durationCount)
 	}
+	fmt.Fprintf(w, "# TYPE lattice_gateway_errors_total counter\n")
+	for _, reason := range sortedKeys(m.errorsTotal) {
+		fmt.Fprintf(w, "lattice_gateway_errors_total{reason=%q} %d\n", reason, m.errorsTotal[reason])
+	}
 	fmt.Fprintf(w, "# TYPE lattice_gateway_queue_depth gauge\n")
 	fmt.Fprintf(w, "lattice_gateway_queue_depth %d\n", inferenceSlots.waiting())
 	fmt.Fprintf(w, "# TYPE lattice_gateway_slots_limit gauge\n")
