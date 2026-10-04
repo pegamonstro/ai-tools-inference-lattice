@@ -325,71 +325,122 @@ func (mb *MemoryBudgeter) availableBytes() uint64 {
 	return free - mb.safeMargin
 }
 
-// slotSemaphore is a dynamic counting semaphore. A fixed-size Go channel cannot
-// resize, so the limit is a mutex-guarded field and waiting uses sync.Cond; the
-// health poll raises or lowers the limit as free memory permits.
-type slotSemaphore struct {
-	mu    sync.Mutex
-	cond  *sync.Cond
-	used  int
-	limit int
+var errQueueFull = fmt.Errorf("inference queue full")
+
+type waiter struct {
+	priority int
+	enqueued time.Time
 }
 
-func newSlotSemaphore(limit int) *slotSemaphore {
-	s := &slotSemaphore{limit: limit}
+// prioritySemaphore is a dynamic counting semaphore that orders waiters by
+// effective priority (tier minus aging), not arrival order.
+type prioritySemaphore struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	used    int
+	limit   int
+	maxQ    int
+	aging   float64 // priority points granted per second of waiting
+	waiters []waiter
+}
+
+func newPrioritySemaphore(limit int, aging float64) *prioritySemaphore {
+	s := &prioritySemaphore{limit: limit, maxQ: 100, aging: aging}
 	s.cond = sync.NewCond(&s.mu)
 	return s
 }
 
-// setLimit changes the concurrency ceiling and wakes waiters, so a raise frees
-// queued requests immediately and a lower just takes effect on the next acquire.
-func (s *slotSemaphore) setLimit(n int) {
+func (s *prioritySemaphore) setLimit(n int) {
 	s.mu.Lock()
 	s.limit = n
 	s.cond.Broadcast()
 	s.mu.Unlock()
 }
-
-func (s *slotSemaphore) limitValue() int {
+func (s *prioritySemaphore) limitValue() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.limit
 }
-
-// acquire takes a slot, blocking until one is free or ctx is done. It returns
-// false when the caller cancelled while queued, so an abandoned request does not
-// hold a slot forever (the same contract the old channel-based acquireSlot had).
-func (s *slotSemaphore) acquire(ctx context.Context) bool {
+func (s *prioritySemaphore) setMaxQueue(n int) {
+	s.mu.Lock()
+	s.maxQ = n
+	s.mu.Unlock()
+}
+func (s *prioritySemaphore) waiting() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for s.used >= s.limit {
+	return len(s.waiters)
+}
+
+// effPriority is the aging-adjusted precedence; lower wins.
+func (s *prioritySemaphore) effPriority(w waiter) float64 {
+	return float64(w.priority) - s.aging*time.Since(w.enqueued).Seconds()
+}
+
+func (s *prioritySemaphore) acquire(ctx context.Context, priority int) (bool, error) {
+	s.mu.Lock()
+	if len(s.waiters) >= s.maxQ {
+		s.mu.Unlock()
+		return false, errQueueFull
+	}
+	w := waiter{priority: priority, enqueued: time.Now()}
+	s.waiters = append(s.waiters, w)
+	for {
 		if ctx.Err() != nil {
+			s.removeWaiter(w)
+			s.mu.Unlock()
+			return false, nil
+		}
+		if s.used < s.limit && s.isHead(w) {
+			s.removeWaiter(w)
+			s.used++
+			s.mu.Unlock()
+			return true, nil
+		}
+		s.wait(ctx)
+	}
+}
+
+// isHead reports whether w is the minimum-effective-priority waiter.
+func (s *prioritySemaphore) isHead(w waiter) bool {
+	for _, other := range s.waiters {
+		if s.effPriority(other) < s.effPriority(w) {
 			return false
 		}
-		done := ctx.Done()
-		if done == nil {
-			s.cond.Wait()
-			continue
-		}
-		// Wake the cond wait when the context is cancelled so the loop above can
-		// re-check and return false. One goroutine per blocked acquire is cheap:
-		// acquires block only while the host is at its concurrency limit.
-		stopped := make(chan struct{})
-		go func() {
-			select {
-			case <-done:
-				s.cond.Broadcast()
-			case <-stopped:
-			}
-		}()
-		s.cond.Wait()
-		close(stopped)
 	}
-	s.used++
 	return true
 }
 
-func (s *slotSemaphore) release() {
+func (s *prioritySemaphore) removeWaiter(w waiter) {
+	for i, other := range s.waiters {
+		if other == w {
+			s.waiters = append(s.waiters[:i], s.waiters[i+1:]...)
+			return
+		}
+	}
+}
+
+// wait blocks until a release/setLimit broadcast or the caller's context is
+// cancelled, matching the old semaphore's cancellation contract.
+func (s *prioritySemaphore) wait(ctx context.Context) {
+	done := ctx.Done()
+	if done == nil {
+		s.cond.Wait()
+		return
+	}
+	stopped := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+			s.cond.Broadcast()
+		case <-stopped:
+		}
+	}()
+	s.cond.Wait()
+	close(stopped)
+}
+
+func (s *prioritySemaphore) release() {
 	s.mu.Lock()
 	s.used--
 	s.cond.Broadcast()
@@ -793,12 +844,26 @@ func ollamaTimeout() time.Duration {
 	return 20 * time.Minute
 }
 
+// agingWeight controls how fast a queued request's effective priority improves,
+// configurable via LATTICE_GATEWAY_AGING_WEIGHT (priority points per second of
+// waiting). A positive weight lets lower-tier requests overtake higher-tier ones
+// after enough queue time, bounding starvation.
+func agingWeight() float64 {
+	if v := latticeconfig.Env("LATTICE_GATEWAY_AGING_WEIGHT", ""); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+			return f
+		}
+	}
+	return 1.0
+}
+
 // acquireSlot takes the single local-inference slot, reporting false if the
 // caller gave up while queued. Blocking forever on the slot would let an
 // abandoned request hold up every later one on a machine that can only run one
 // model at a time.
 func acquireSlot(ctx context.Context) bool {
-	return inferenceSlots.acquire(ctx)
+	granted, _ := inferenceSlots.acquire(ctx, 1)
+	return granted
 }
 
 // resolveMaxTokens caps output length via the max_budget provider param
@@ -865,7 +930,7 @@ var (
 	// the eviction churn a hard single slot would force. The memory budgeter
 	// remains the per-request backstop that rejects when free RAM drops below the
 	// safety margin.
-	inferenceSlots = newSlotSemaphore(1)
+	inferenceSlots = newPrioritySemaphore(1, agingWeight())
 
 	// maxSlots caps the dynamic slot count so a host full of tiny models never
 	// announces unbounded concurrency. Overridden in main() from
@@ -1401,6 +1466,12 @@ func main() {
 	if v := latticeconfig.Env("LATTICE_GATEWAY_MAX_SLOTS", ""); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			maxSlots = n
+		}
+	}
+
+	if v := latticeconfig.Env("LATTICE_GATEWAY_MAX_QUEUE", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			inferenceSlots.setMaxQueue(n)
 		}
 	}
 

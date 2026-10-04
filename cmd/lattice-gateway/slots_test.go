@@ -39,18 +39,18 @@ func TestComputeSlots(t *testing.T) {
 	}
 }
 
-func TestSlotSemaphoreBasic(t *testing.T) {
-	s := newSlotSemaphore(2)
-	if !s.acquire(context.Background()) {
+func TestPrioritySemaphoreBasic(t *testing.T) {
+	s := newPrioritySemaphore(2, 0.0)
+	if granted, err := s.acquire(context.Background(), 1); !granted || err != nil {
 		t.Fatal("first acquire failed")
 	}
-	if !s.acquire(context.Background()) {
+	if granted, err := s.acquire(context.Background(), 1); !granted || err != nil {
 		t.Fatal("second acquire failed")
 	}
 
 	// A third acquire must block while both slots are held.
 	done := make(chan bool, 1)
-	go func() { done <- s.acquire(context.Background()) }()
+	go func() { g, _ := s.acquire(context.Background(), 1); done <- g }()
 	select {
 	case <-done:
 		t.Fatal("third acquire should have blocked")
@@ -68,14 +68,14 @@ func TestSlotSemaphoreBasic(t *testing.T) {
 	}
 }
 
-func TestSlotSemaphoreResize(t *testing.T) {
-	s := newSlotSemaphore(1)
-	if !s.acquire(context.Background()) {
+func TestPrioritySemaphoreResize(t *testing.T) {
+	s := newPrioritySemaphore(1, 0.0)
+	if granted, err := s.acquire(context.Background(), 1); !granted || err != nil {
 		t.Fatal("first acquire failed")
 	}
 
 	done := make(chan bool, 1)
-	go func() { done <- s.acquire(context.Background()) }()
+	go func() { g, _ := s.acquire(context.Background(), 1); done <- g }()
 	select {
 	case <-done:
 		t.Fatal("second acquire should have blocked at limit 1")
@@ -98,15 +98,15 @@ func TestSlotSemaphoreResize(t *testing.T) {
 	}
 }
 
-func TestSlotSemaphoreCancel(t *testing.T) {
-	s := newSlotSemaphore(1)
-	if !s.acquire(context.Background()) {
+func TestPrioritySemaphoreCancel(t *testing.T) {
+	s := newPrioritySemaphore(1, 0.0)
+	if granted, err := s.acquire(context.Background(), 1); !granted || err != nil {
 		t.Fatal("first acquire failed")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan bool, 1)
-	go func() { done <- s.acquire(ctx) }()
+	go func() { g, err := s.acquire(ctx, 1); done <- (g || err != nil) }()
 
 	time.Sleep(30 * time.Millisecond)
 	cancel()
@@ -118,5 +118,60 @@ func TestSlotSemaphoreCancel(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("acquire did not return after cancel")
+	}
+}
+
+func TestPrioritySemaphoreOrdering(t *testing.T) {
+	s := newPrioritySemaphore(1, 0.0)  // aging off for a deterministic ordering test
+	s.acquire(context.Background(), 1) // hold the single slot
+
+	done := make(chan int, 3)
+	// Enqueue batch(2) first, then interactive(0): interactive must win the slot.
+	for _, p := range []int{2, 0, 1} {
+		go func(p int) { s.acquire(context.Background(), p); done <- p }(p)
+	}
+
+	// Wait for all three goroutines to enqueue before releasing, so the release
+	// cannot fire while the queue is still being populated.
+	for i := 0; i < 200 && s.waiting() < 3; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	s.release()
+
+	// First release grants the interactive(0) waiter.
+	select {
+	case p := <-done:
+		if p != 0 {
+			t.Fatalf("first granted priority = %d, want 0", p)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no waiter granted after release")
+	}
+}
+
+func TestPrioritySemaphoreQueueFull(t *testing.T) {
+	s := newPrioritySemaphore(1, 0.0)
+	s.setMaxQueue(1)
+	s.acquire(context.Background(), 1) // hold the slot
+
+	// Fill the single queue slot so the checked acquire is actually rejected.
+	go s.acquire(context.Background(), 1)
+	for i := 0; i < 200 && s.waiting() < 1; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	granted, err := s.acquire(context.Background(), 1)
+	if granted || err != errQueueFull {
+		t.Fatalf("acquire = (%v, %v), want (false, errQueueFull)", granted, err)
+	}
+}
+
+func TestPrioritySemaphoreWaiting(t *testing.T) {
+	s := newPrioritySemaphore(1, 0.0)
+	s.acquire(context.Background(), 1)
+	go s.acquire(context.Background(), 1)
+	time.Sleep(30 * time.Millisecond)
+	if got := s.waiting(); got != 1 {
+		t.Fatalf("waiting() = %d, want 1", got)
 	}
 }

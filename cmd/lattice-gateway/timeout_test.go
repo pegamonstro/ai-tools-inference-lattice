@@ -41,7 +41,8 @@ func TestOllamaTimeoutDefaultsGenerouslyAndHonoursOverride(t *testing.T) {
 func TestAcquireSlotYieldsToCancelledContext(t *testing.T) {
 	// Fill the only slot.
 	inferenceSlots.setLimit(1)
-	if !inferenceSlots.acquire(context.Background()) {
+	granted, _ := inferenceSlots.acquire(context.Background(), 1)
+	if !granted {
 		t.Fatal("could not fill the slot")
 	}
 
