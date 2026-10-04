@@ -185,6 +185,8 @@ var (
 )
 
 func logTelemetry(t Telemetry) {
+	metrics.observe(t)
+
 	// Constant, and set here rather than by callers so no call site can forget
 	// it. The gateway has no target field and does not gain one: its provenance
 	// is this process, and locality is the one shared dimension the three streams
@@ -1456,6 +1458,7 @@ func newRouter() *http.ServeMux {
 	mux.HandleFunc("/v1/audio/speech", handleAudioSpeech)
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/telemetry", handleTelemetry)
+	mux.HandleFunc("/metrics", handleMetrics)
 	return mux
 }
 
