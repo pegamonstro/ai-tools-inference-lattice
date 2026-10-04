@@ -39,27 +39,44 @@ func (m *metricsStore) observe(te Telemetry) {
 
 func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+
+	// Snapshot under lock, then write outside it: holding the mutex during
+	// HTTP I/O would stall observe() — and thus every completing request —
+	// on a slow or stalled scraper.
 	m := metrics
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	requests := make(map[string]int64, len(m.requestsTotal))
+	for k, v := range m.requestsTotal {
+		requests[k] = v
+	}
+	errors := make(map[string]int64, len(m.errorsTotal))
+	for k, v := range m.errorsTotal {
+		errors[k] = v
+	}
+	durationSum := m.durationSum
+	durationCount := m.durationCount
+	m.mu.Unlock()
+
+	queueDepth := inferenceSlots.waiting()
+	slotsLimit := inferenceSlots.limitValue()
 
 	fmt.Fprintf(w, "# TYPE lattice_gateway_requests_total counter\n")
-	for _, model := range sortedKeys(m.requestsTotal) {
-		fmt.Fprintf(w, "lattice_gateway_requests_total{model=%q} %d\n", model, m.requestsTotal[model])
+	for _, model := range sortedKeys(requests) {
+		fmt.Fprintf(w, "lattice_gateway_requests_total{model=%q} %d\n", model, requests[model])
 	}
 	fmt.Fprintf(w, "# TYPE lattice_gateway_request_duration_seconds summary\n")
-	if m.durationCount > 0 {
-		fmt.Fprintf(w, "lattice_gateway_request_duration_seconds_sum %f\n", m.durationSum)
-		fmt.Fprintf(w, "lattice_gateway_request_duration_seconds_count %d\n", m.durationCount)
+	if durationCount > 0 {
+		fmt.Fprintf(w, "lattice_gateway_request_duration_seconds_sum %f\n", durationSum)
+		fmt.Fprintf(w, "lattice_gateway_request_duration_seconds_count %d\n", durationCount)
 	}
 	fmt.Fprintf(w, "# TYPE lattice_gateway_errors_total counter\n")
-	for _, reason := range sortedKeys(m.errorsTotal) {
-		fmt.Fprintf(w, "lattice_gateway_errors_total{reason=%q} %d\n", reason, m.errorsTotal[reason])
+	for _, reason := range sortedKeys(errors) {
+		fmt.Fprintf(w, "lattice_gateway_errors_total{reason=%q} %d\n", reason, errors[reason])
 	}
 	fmt.Fprintf(w, "# TYPE lattice_gateway_queue_depth gauge\n")
-	fmt.Fprintf(w, "lattice_gateway_queue_depth %d\n", inferenceSlots.waiting())
+	fmt.Fprintf(w, "lattice_gateway_queue_depth %d\n", queueDepth)
 	fmt.Fprintf(w, "# TYPE lattice_gateway_slots_limit gauge\n")
-	fmt.Fprintf(w, "lattice_gateway_slots_limit %d\n", inferenceSlots.limitValue())
+	fmt.Fprintf(w, "lattice_gateway_slots_limit %d\n", slotsLimit)
 }
 
 func sortedKeys(m map[string]int64) []string {

@@ -136,6 +136,9 @@ func TestPrioritySemaphoreOrdering(t *testing.T) {
 	for i := 0; i < 200 && s.waiting() < 3; i++ {
 		time.Sleep(5 * time.Millisecond)
 	}
+	if s.waiting() < 3 {
+		t.Fatal("waiters did not enqueue in time")
+	}
 	s.release()
 
 	// First release grants the interactive(0) waiter.
@@ -182,5 +185,60 @@ func TestPrioritySemaphoreWaiting(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	if got := s.waiting(); got != 1 {
 		t.Fatalf("waiting() = %d, want 1", got)
+	}
+}
+
+func TestAgingWeight(t *testing.T) {
+	if got := agingWeight(); got != 1.0 {
+		t.Errorf("default agingWeight = %v, want 1.0", got)
+	}
+
+	t.Setenv("LATTICE_GATEWAY_AGING_WEIGHT", "3.5")
+	if got := agingWeight(); got != 3.5 {
+		t.Errorf("override agingWeight = %v, want 3.5", got)
+	}
+
+	t.Setenv("LATTICE_GATEWAY_AGING_WEIGHT", "banana")
+	if got := agingWeight(); got != 1.0 {
+		t.Errorf("invalid value gave %v, want the 1.0 default", got)
+	}
+
+	t.Setenv("LATTICE_GATEWAY_AGING_WEIGHT", "-1")
+	if got := agingWeight(); got != 1.0 {
+		t.Errorf("negative value gave %v, want the 1.0 default", got)
+	}
+}
+
+func TestPrioritySemaphoreAging(t *testing.T) {
+	s := newPrioritySemaphore(1, 5.0) // 5 priority points/sec so aging wins fast
+	s.acquire(context.Background(), 1) // hold the single slot
+
+	done := make(chan int, 2)
+	go func() { s.acquire(context.Background(), 2); done <- 2 }() // batch first
+	for i := 0; i < 200 && s.waiting() < 1; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if s.waiting() < 1 {
+		t.Fatal("batch waiter did not enqueue")
+	}
+
+	time.Sleep(600 * time.Millisecond) // age batch: eff = 2 - 5*0.6 = -1
+
+	go func() { s.acquire(context.Background(), 0); done <- 0 }() // interactive later
+	for i := 0; i < 200 && s.waiting() < 2; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if s.waiting() < 2 {
+		t.Fatal("interactive waiter did not enqueue")
+	}
+
+	s.release()
+	select {
+	case p := <-done:
+		if p != 2 {
+			t.Fatalf("first granted = %d, want 2 (aged batch must overtake interactive)", p)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no waiter granted")
 	}
 }

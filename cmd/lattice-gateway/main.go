@@ -860,9 +860,9 @@ func agingWeight() float64 {
 }
 
 // acquireSlot takes the single local-inference slot, reporting false if the
-// caller gave up while queued. Blocking forever on the slot would let an
-// abandoned request hold up every later one on a machine that can only run one
-// model at a time.
+// caller gave up while queued and errQueueFull if the queue is at capacity.
+// Blocking forever on the slot would let an abandoned request hold up every
+// later one on a machine that can only run one model at a time.
 func acquireSlot(ctx context.Context, priority int) (bool, error) {
 	return inferenceSlots.acquire(ctx, priority)
 }
