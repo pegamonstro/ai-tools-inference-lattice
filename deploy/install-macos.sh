@@ -118,6 +118,8 @@ MFLUX_LABEL="com.lattice.mflux"
 MFLUX_TEMPLATE="$REPO_ROOT/deploy/$MFLUX_LABEL.plist.in"
 MFLUX_PYTHON="/usr/bin/python3"
 MFLUX_BIN="$HOME/.local/bin/mflux-generate"
+MFLUX_FILL_BIN="$HOME/.local/bin/mflux-generate-fill"
+MFLUX_REDUX_BIN="$HOME/.local/bin/mflux-generate-redux"
 # The 4-bit model baked by `mflux-save --model schnell --quantize 4` (see the spec
 # and the M6 cutover notes). A username-path that must not be committed. The
 # uncensored Lustly LoRA (shauray/flux-uncensored-lora) is set in the plist
@@ -138,7 +140,7 @@ if [[ -x "$MFLUX_BIN" ]]; then
       fi
     done
   fi
-  sed -e "s|__MFLUX_PYTHON__|$MFLUX_PYTHON|g" -e "s|__MFLUX_BIN__|$MFLUX_BIN|g" -e "s|__MFLUX_MODEL__|$MFLUX_MODEL|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
+  sed -e "s|__MFLUX_PYTHON__|$MFLUX_PYTHON|g" -e "s|__MFLUX_BIN__|$MFLUX_BIN|g" -e "s|__MFLUX_FILL_BIN__|$MFLUX_FILL_BIN|g" -e "s|__MFLUX_REDUX_BIN__|$MFLUX_REDUX_BIN|g" -e "s|__MFLUX_MODEL__|$MFLUX_MODEL|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
     "$MFLUX_TEMPLATE" >"$MFLUX_DEST"
   launchctl bootstrap "$DOMAIN" "$MFLUX_DEST"
   if launchctl print "$DOMAIN/$MFLUX_LABEL" >/dev/null 2>&1; then

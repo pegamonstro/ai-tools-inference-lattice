@@ -40,6 +40,10 @@
     <dict>
         <key>MFLUX_BIN</key>
         <string>__MFLUX_BIN__</string>
+        <key>MFLUX_FILL_BIN</key>
+        <string>__MFLUX_FILL_BIN__</string>
+        <key>MFLUX_REDUX_BIN</key>
+        <string>__MFLUX_REDUX_BIN__</string>
         <key>MFLUX_MODEL</key>
         <string>__MFLUX_MODEL__</string>
         <key>MFLUX_LORA</key>
