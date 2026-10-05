@@ -200,6 +200,44 @@ else
   echo "note: speech venv not found at $SPEECH_PYTHON — skipping the speech sidecar."
 fi
 
+# The ESRGAN sidecar — the local Real-ESRGAN super-resolution backend for img-gen's
+# "Upscale (4x)" mode. Like mflux it is optional and only supervised when its CLI
+# (a uv-tool shim, a username-path that must not be committed) is present. It is a
+# separate service from mflux because upscaling is a distinct, deterministic pass
+# with its own single-flight lifecycle and 4x RAM profile.
+ESRGAN_LABEL="com.lattice.esrgan"
+ESRGAN_TEMPLATE="$REPO_ROOT/deploy/$ESRGAN_LABEL.plist.in"
+ESRGAN_PYTHON="/usr/bin/python3"
+ESRGAN_BIN="$HOME/.local/bin/realesrgan-mlx"
+ESRGAN_DEST="$HOME/Library/LaunchAgents/$ESRGAN_LABEL.plist"
+
+if [[ -x "$ESRGAN_BIN" ]]; then
+  launchctl bootout "$DOMAIN/$ESRGAN_LABEL" 2>/dev/null || true
+  busy="$(lsof -nP -iTCP:8901 -sTCP:LISTEN -t 2>/dev/null || true)"
+  if [[ -n "$busy" ]]; then
+    for pid in $busy; do
+      if [[ "$(ps -o command= -p "$pid" 2>/dev/null)" == *esrgan-sidecar.py* ]]; then
+        echo "error: an unmanaged esrgan sidecar (pid $pid) is holding :8901." >&2
+        echo "stop it, then re-run this script:" >&2
+        echo "  kill $pid" >&2
+        exit 1
+      fi
+    done
+  fi
+  sed -e "s|__ESRGAN_PYTHON__|$ESRGAN_PYTHON|g" -e "s|__ESRGAN_BIN__|$ESRGAN_BIN|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
+    "$ESRGAN_TEMPLATE" >"$ESRGAN_DEST"
+  launchctl bootstrap "$DOMAIN" "$ESRGAN_DEST"
+  if launchctl print "$DOMAIN/$ESRGAN_LABEL" >/dev/null 2>&1; then
+    echo "installed: $ESRGAN_DEST"
+    echo "running  : $DOMAIN/$ESRGAN_LABEL"
+    echo "logs     : $LOG_DIR/lattice-esrgan.{out,err}.log"
+  else
+    echo "warning: esrgan bootstrap failed — check $LOG_DIR/lattice-esrgan.err.log" >&2
+  fi
+else
+  echo "note: realesrgan-mlx not found at $ESRGAN_BIN — skipping the esrgan sidecar."
+fi
+
 # The IOGPU wired-memory-limit daemon is a LaunchDaemon (system domain, root), so it is
 # installed by its own sudo script rather than here — this script runs without sudo.
 #   sudo ./deploy/install-iogpu.sh

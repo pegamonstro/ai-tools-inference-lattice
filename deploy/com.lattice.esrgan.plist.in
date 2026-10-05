@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lattice ESRGAN sidecar — macOS LaunchAgent template.
+
+  The Real-ESRGAN super-resolution backend for img-gen's "Upscale (4x)" mode. It
+  runs on the Mac (the only MLX host, same machine as the mflux sidecar) because
+  realesrgan-mlx is an MLX port of Real-ESRGAN. It is a separate service from the
+  mflux sidecar rather than another endpoint on it because upscaling is a distinct,
+  deterministic model pass (no prompt, no diffusion) with its own single-flight
+  lifecycle and its own RAM pressure profile at 4x.
+
+  install-macos.sh substitutes the placeholders and installs the result to
+  ~/Library/LaunchAgents/. ESRGAN_BIN is the realesrgan-mlx CLI (a uv-tool shim,
+  like mflux); ESRGAN_PYTHON is the system Python (the sidecar is stdlib-only and
+  shells out to the CLI). The CLI auto-downloads its weights from the HF hub on
+  first run. ESRGAN_TILE caps Metal memory (256 px) so a 4x pass does not OOM under
+  a concurrent mflux generation.
+  ESRGAN_BIND must be 0.0.0.0 so img-gen (on another host) can reach it over the
+  tailnet; the sidecar is unauthenticated, matching the mflux sidecar's posture.
+  Port 8901 (8900 is the speech sidecar's loopback port).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lattice.esrgan</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__ESRGAN_PYTHON__</string>
+        <string>__REPO_ROOT__/deploy/esrgan-sidecar.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ESRGAN_BIN</key>
+        <string>__ESRGAN_BIN__</string>
+        <key>ESRGAN_MODEL</key>
+        <string>RealESRGAN_x4plus</string>
+        <key>ESRGAN_TILE</key>
+        <string>256</string>
+        <key>ESRGAN_BIND</key>
+        <string>0.0.0.0</string>
+        <key>ESRGAN_PORT</key>
+        <string>8901</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/lattice-esrgan.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/lattice-esrgan.err.log</string>
+</dict>
+</plist>
