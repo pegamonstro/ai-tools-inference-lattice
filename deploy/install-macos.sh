@@ -120,11 +120,11 @@ MFLUX_PYTHON="/usr/bin/python3"
 MFLUX_BIN="$HOME/.local/bin/mflux-generate"
 MFLUX_FILL_BIN="$HOME/.local/bin/mflux-generate-fill"
 MFLUX_REDUX_BIN="$HOME/.local/bin/mflux-generate-redux"
-# The 4-bit model baked by `mflux-save --model dev --quantize 4` (see the spec
-# and the M6 cutover notes). A username-path that must not be committed. The
-# uncensored Lustly LoRA (shauray/flux-uncensored-lora) is set in the plist
-# template's MFLUX_LORA and applied at inference time, not baked.
-MFLUX_MODEL="$HOME/mflux-models/flux-dev-4bit"
+# The 4-bit model baked by `mflux-save --model <path> --base-model dev --quantize 4`
+# (see the spec and the M6 cutover notes). A username-path that must not be
+# committed. This is Persephone 2.0 (Civitai #1775002), a dedicated NSFW
+# FLUX.1-dev transformer fine-tune baked in place of dev's weights — no LoRA.
+MFLUX_MODEL="$HOME/mflux-models/persephone-4bit"
 # Baked 4-bit fill/redux models (mflux-save --model dev-fill / dev-redux --quantize 4).
 # Their quantize env vars stay empty — the models are already 4-bit, and the sidecar
 # passes --model <path> (no --base-model) + --vae-tiling for the 1024² decode.
