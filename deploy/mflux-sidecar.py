@@ -22,6 +22,10 @@ Endpoints:
   POST /generate -> {prompt, negative_prompt?, width?, height?, steps?, guidance?,
                      seed?} -> {image: b64, seed, width, height, seconds} | {error}
   POST /edit     -> same as /generate plus {init_image: b64, strength?}
+  POST /fill     -> {prompt, image: b64, mask: b64, steps?, guidance?, seed?}
+  POST /redux    -> {prompt, images: [b64...], strengths: [f...], width?, height?,
+                     steps?, seed?}
+
 """
 
 from __future__ import annotations
@@ -49,6 +53,11 @@ BIND = os.environ.get("MFLUX_BIND", "127.0.0.1")
 PORT = int(os.environ.get("MFLUX_PORT", "8899"))
 TOKEN = os.environ.get("MFLUX_TOKEN", "")  # optional shared secret
 GEN_TIMEOUT = int(os.environ.get("MFLUX_GEN_TIMEOUT", "3600"))
+
+FILL_BIN = os.environ.get("MFLUX_FILL_BIN", os.path.expanduser("~/.local/bin/mflux-generate-fill"))
+REDUX_BIN = os.environ.get("MFLUX_REDUX_BIN", os.path.expanduser("~/.local/bin/mflux-generate-redux"))
+FILL_QUANTIZE = os.environ.get("MFLUX_FILL_QUANTIZE", "8")
+REDUX_QUANTIZE = os.environ.get("MFLUX_REDUX_QUANTIZE", "8")
 
 _lock = threading.Lock()
 
@@ -87,6 +96,67 @@ def run_generation(params: dict) -> bytes:
             return fh.read()
 
 
+def run_fill(params: dict) -> bytes:
+    """Run one mflux-generate-fill invocation (masked inpainting)."""
+    with tempfile.TemporaryDirectory(prefix="mflux-") as td:
+        img_path = os.path.join(td, "image.png")
+        mask_path = os.path.join(td, "mask.png")
+        out = os.path.join(td, "out.png")
+        with open(img_path, "wb") as fh:
+            fh.write(base64.b64decode(params["image"]))
+        with open(mask_path, "wb") as fh:
+            fh.write(base64.b64decode(params["mask"]))
+
+        cmd = [
+            FILL_BIN,
+            "--prompt", params["prompt"],
+            "--image-path", img_path,
+            "--masked-image-path", mask_path,
+            "--output", out,
+            "--seed", str(params["seed"]),
+            "--steps", str(params.get("steps", 25)),
+            "--guidance", str(params.get("guidance", 30.0)),
+            "-q", FILL_QUANTIZE,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=GEN_TIMEOUT)
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "mflux-generate-fill failed").strip()
+            raise RuntimeError(detail[-800:])
+        with open(out, "rb") as fh:
+            return fh.read()
+
+
+def run_redux(params: dict) -> bytes:
+    """Run one mflux-generate-redux invocation (multi-reference)."""
+    with tempfile.TemporaryDirectory(prefix="mflux-") as td:
+        paths = []
+        for i, b64 in enumerate(params["images"]):
+            p = os.path.join(td, f"ref{i}.png")
+            with open(p, "wb") as fh:
+                fh.write(base64.b64decode(b64))
+            paths.append(p)
+        out = os.path.join(td, "out.png")
+
+        cmd = [
+            REDUX_BIN,
+            "--prompt", params["prompt"],
+            "--redux-image-paths", *paths,
+            "--redux-image-strengths", *[str(s) for s in params["strengths"]],
+            "--output", out,
+            "--seed", str(params["seed"]),
+            "--width", str(params.get("width", 1024)),
+            "--height", str(params.get("height", 1024)),
+            "--steps", str(params.get("steps", 20)),
+            "-q", REDUX_QUANTIZE,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=GEN_TIMEOUT)
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "mflux-generate-redux failed").strip()
+            raise RuntimeError(detail[-800:])
+        with open(out, "rb") as fh:
+            return fh.read()
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, code: int, obj: dict) -> None:
         body = json.dumps(obj).encode()
@@ -116,7 +186,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(401, {"error": "unauthorized", "error_type": "auth"}); return
 
         path = self.path.rstrip("/")
-        if path not in ("/generate", "/edit"):
+        if path not in ("/generate", "/edit", "/fill", "/redux"):
             self._send_json(404, {"error": "not found"}); return
 
         try:
@@ -127,23 +197,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if not isinstance(body.get("prompt"), str) or not body["prompt"].strip():
             self._send_json(400, {"error": "prompt is required", "error_type": "invalid_argument"}); return
-        if path == "/edit" and not body.get("init_image"):
-            self._send_json(400, {"error": "init_image is required for /edit", "error_type": "invalid_argument"}); return
 
         try:
-            params = {
-                "prompt": body["prompt"].strip(),
-                "negative_prompt": body.get("negative_prompt"),
-                "width": int(body.get("width", 1024)),
-                "height": int(body.get("height", 1024)),
-                "steps": int(body["steps"]) if body.get("steps") else None,
-                "guidance": float(body["guidance"]) if body.get("guidance") else None,
-                "seed": int(body["seed"]) if body.get("seed") is not None else random.randrange(0, 1_000_000_000),
-                "init_image": body.get("init_image") if path == "/edit" else None,
-                "strength": float(body.get("strength", 0.4)) if path == "/edit" else None,
-            }
+            params = self._build_params(path, body)
         except (ValueError, TypeError):
-            self._send_json(400, {"error": "width/height/steps/guidance/seed/strength must be numeric", "error_type": "invalid_argument"}); return
+            self._send_json(400, {"error": "width/height/steps/guidance/seed/strength must be numeric and image inputs present", "error_type": "invalid_argument"}); return
 
         if not _lock.acquire(blocking=False):
             self._send_json(409, {"error": "generation already in progress", "error_type": "busy"}); return
@@ -151,20 +209,64 @@ class Handler(BaseHTTPRequestHandler):
         try:
             t0 = time.time()
             try:
-                img = run_generation(params)
+                if path in ("/generate", "/edit"):
+                    img = run_generation(params)
+                elif path == "/fill":
+                    img = run_fill(params)
+                else:
+                    img = run_redux(params)
             except subprocess.TimeoutExpired:
                 self._send_json(504, {"error": "generation timed out", "error_type": "timeout"}); return
             except Exception as exc:  # noqa: BLE001 — surface the subprocess's own error text
                 self._send_json(500, {"error": str(exc), "error_type": "provider_error"}); return
             self._send_json(200, {
                 "image": base64.b64encode(img).decode("ascii"),
-                "seed": params["seed"],
-                "width": params["width"],
-                "height": params["height"],
+                "seed": params.get("seed"),
+                "width": params.get("width"),
+                "height": params.get("height"),
                 "seconds": round(time.time() - t0, 1),
             })
         finally:
             _lock.release()
+
+    def _build_params(self, path: str, body: dict) -> dict:
+        common = {
+            "prompt": body["prompt"].strip(),
+            "seed": int(body["seed"]) if body.get("seed") is not None else random.randrange(0, 1_000_000_000),
+        }
+        if path in ("/generate", "/edit"):
+            p = dict(common,
+                     negative_prompt=body.get("negative_prompt"),
+                     width=int(body.get("width", 1024)),
+                     height=int(body.get("height", 1024)),
+                     steps=int(body["steps"]) if body.get("steps") else None,
+                     guidance=float(body["guidance"]) if body.get("guidance") else None)
+            if path == "/edit":
+                if not body.get("init_image"):
+                    raise TypeError("init_image required")
+                p["init_image"] = body["init_image"]
+                p["strength"] = float(body.get("strength", 0.4))
+            return p
+        if path == "/fill":
+            if not body.get("image") or not body.get("mask"):
+                raise TypeError("image and mask required")
+            return dict(common,
+                        image=body["image"], mask=body["mask"],
+                        steps=int(body["steps"]) if body.get("steps") else 25,
+                        guidance=float(body["guidance"]) if body.get("guidance") else 30.0)
+        # /redux
+        images = body.get("images")
+        if not isinstance(images, list) or not images:
+            raise TypeError("images required")
+        strengths = body.get("strengths") or [1.0] * len(images)
+        if len(strengths) < len(images):
+            strengths = list(strengths) + [1.0] * (len(images) - len(strengths))
+        return dict(common,
+                    images=images,
+                    strengths=[float(s) for s in strengths[: len(images)]],
+                    width=int(body.get("width", 1024)),
+                    height=int(body.get("height", 1024)),
+                    steps=int(body["steps"]) if body.get("steps") else 20)
 
     def log_message(self, *args) -> None:  # quiet; the LaunchAgent captures stdout/stderr
         pass
