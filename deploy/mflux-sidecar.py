@@ -56,6 +56,13 @@ GEN_TIMEOUT = int(os.environ.get("MFLUX_GEN_TIMEOUT", "3600"))
 
 FILL_BIN = os.environ.get("MFLUX_FILL_BIN", os.path.expanduser("~/.local/bin/mflux-generate-fill"))
 REDUX_BIN = os.environ.get("MFLUX_REDUX_BIN", os.path.expanduser("~/.local/bin/mflux-generate-redux"))
+# Baked 4-bit models (mflux-save output), used via --model <path>. Unlike generate,
+# the fill/redux CLIs hardcode their model_config (dev-fill / dev-redux), so a baked
+# path needs no --base-model: --model alone selects the weights. When FILL_MODEL /
+# REDUX_MODEL point at a baked model, the matching *_QUANTIZE must be empty (the
+# model is already 4-bit; re-quantizing a baked model OOMs).
+FILL_MODEL = os.environ.get("MFLUX_FILL_MODEL", "dev-fill")
+REDUX_MODEL = os.environ.get("MFLUX_REDUX_MODEL", "dev-redux")
 FILL_QUANTIZE = os.environ.get("MFLUX_FILL_QUANTIZE", "8")
 REDUX_QUANTIZE = os.environ.get("MFLUX_REDUX_QUANTIZE", "8")
 
@@ -109,6 +116,7 @@ def run_fill(params: dict) -> bytes:
 
         cmd = [
             FILL_BIN,
+            "--model", FILL_MODEL,
             "--prompt", params["prompt"],
             "--image-path", img_path,
             "--masked-image-path", mask_path,
@@ -116,8 +124,10 @@ def run_fill(params: dict) -> bytes:
             "--seed", str(params["seed"]),
             "--steps", str(params.get("steps", 25)),
             "--guidance", str(params.get("guidance", 30.0)),
-            "-q", FILL_QUANTIZE,
+            "--vae-tiling",
         ]
+        if FILL_QUANTIZE:
+            cmd += ["-q", FILL_QUANTIZE]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=GEN_TIMEOUT)
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "mflux-generate-fill failed").strip()
@@ -139,6 +149,7 @@ def run_redux(params: dict) -> bytes:
 
         cmd = [
             REDUX_BIN,
+            "--model", REDUX_MODEL,
             "--prompt", params["prompt"],
             "--redux-image-paths", *paths,
             "--redux-image-strengths", *[str(s) for s in params["strengths"]],
@@ -147,8 +158,10 @@ def run_redux(params: dict) -> bytes:
             "--width", str(params.get("width", 1024)),
             "--height", str(params.get("height", 1024)),
             "--steps", str(params.get("steps", 20)),
-            "-q", REDUX_QUANTIZE,
+            "--vae-tiling",
         ]
+        if REDUX_QUANTIZE:
+            cmd += ["-q", REDUX_QUANTIZE]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=GEN_TIMEOUT)
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "mflux-generate-redux failed").strip()

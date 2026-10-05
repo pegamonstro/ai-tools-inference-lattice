@@ -19,6 +19,12 @@
   benchmark notes). MFLUX_LORA is the Lustly.ai uncensored LoRA; it is applied at
   inference time, not baked. The LoRA is dev-trained, so it applies faithfully to
   FLUX.1-dev, the model this agent serves.
+  MFLUX_FILL_MODEL and MFLUX_REDUX_MODEL point at the baked 4-bit fill/redux models
+  (mflux-save --model dev-fill / dev-redux --quantize 4), so MFLUX_FILL_QUANTIZE and
+  MFLUX_REDUX_QUANTIZE are likewise empty. The fill/redux CLIs hardcode their
+  model_config (dev-fill / dev-redux), so unlike generate they need no --base-model:
+  --model <path> alone selects the baked weights, and the sidecar passes --vae-tiling
+  for the same 1024² VAE decode as generate.
   MFLUX_BIN is the uv-tool shim that runs mflux-generate (the sidecar itself is
   stdlib Python and shells out to it).
   MFLUX_BIND must be 0.0.0.0 so the Pi can reach it over the tailnet; the sidecar is
@@ -45,11 +51,19 @@
         <string>__MFLUX_REDUX_BIN__</string>
         <key>MFLUX_MODEL</key>
         <string>__MFLUX_MODEL__</string>
+        <key>MFLUX_FILL_MODEL</key>
+        <string>__MFLUX_FILL_MODEL__</string>
+        <key>MFLUX_REDUX_MODEL</key>
+        <string>__MFLUX_REDUX_MODEL__</string>
         <key>MFLUX_LORA</key>
         <string>shauray/flux-uncensored-lora</string>
         <key>MFLUX_LORA_SCALE</key>
         <string>1.0</string>
         <key>MFLUX_QUANTIZE</key>
+        <string></string>
+        <key>MFLUX_FILL_QUANTIZE</key>
+        <string></string>
+        <key>MFLUX_REDUX_QUANTIZE</key>
         <string></string>
         <key>MFLUX_BIND</key>
         <string>0.0.0.0</string>

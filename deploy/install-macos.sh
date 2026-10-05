@@ -125,6 +125,11 @@ MFLUX_REDUX_BIN="$HOME/.local/bin/mflux-generate-redux"
 # uncensored Lustly LoRA (shauray/flux-uncensored-lora) is set in the plist
 # template's MFLUX_LORA and applied at inference time, not baked.
 MFLUX_MODEL="$HOME/mflux-models/flux-dev-4bit"
+# Baked 4-bit fill/redux models (mflux-save --model dev-fill / dev-redux --quantize 4).
+# Their quantize env vars stay empty — the models are already 4-bit, and the sidecar
+# passes --model <path> (no --base-model) + --vae-tiling for the 1024² decode.
+MFLUX_FILL_MODEL="$HOME/mflux-models/flux-fill-dev-4bit"
+MFLUX_REDUX_MODEL="$HOME/mflux-models/flux-redux-dev-4bit"
 MFLUX_DEST="$HOME/Library/LaunchAgents/$MFLUX_LABEL.plist"
 
 if [[ -x "$MFLUX_BIN" ]]; then
@@ -140,7 +145,7 @@ if [[ -x "$MFLUX_BIN" ]]; then
       fi
     done
   fi
-  sed -e "s|__MFLUX_PYTHON__|$MFLUX_PYTHON|g" -e "s|__MFLUX_BIN__|$MFLUX_BIN|g" -e "s|__MFLUX_FILL_BIN__|$MFLUX_FILL_BIN|g" -e "s|__MFLUX_REDUX_BIN__|$MFLUX_REDUX_BIN|g" -e "s|__MFLUX_MODEL__|$MFLUX_MODEL|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
+  sed -e "s|__MFLUX_PYTHON__|$MFLUX_PYTHON|g" -e "s|__MFLUX_BIN__|$MFLUX_BIN|g" -e "s|__MFLUX_FILL_BIN__|$MFLUX_FILL_BIN|g" -e "s|__MFLUX_REDUX_BIN__|$MFLUX_REDUX_BIN|g" -e "s|__MFLUX_MODEL__|$MFLUX_MODEL|g" -e "s|__MFLUX_FILL_MODEL__|$MFLUX_FILL_MODEL|g" -e "s|__MFLUX_REDUX_MODEL__|$MFLUX_REDUX_MODEL|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
     "$MFLUX_TEMPLATE" >"$MFLUX_DEST"
   launchctl bootstrap "$DOMAIN" "$MFLUX_DEST"
   if launchctl print "$DOMAIN/$MFLUX_LABEL" >/dev/null 2>&1; then
