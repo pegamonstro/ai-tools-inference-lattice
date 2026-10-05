@@ -73,8 +73,13 @@ def run_generation(params: dict) -> bytes:
     """Run one mflux-generate invocation; return the PNG bytes, or raise."""
     with tempfile.TemporaryDirectory(prefix="mflux-") as td:
         out = os.path.join(td, "out.png")
-        cmd = [BIN, "--model", MODEL, "--output", out]
-        if LORA:
+        model = params.get("model") or MODEL
+        cmd = [BIN, "--model", model, "--output", out]
+        loras = params.get("loras")
+        if loras:
+            for ref in loras:
+                cmd += ["--lora", ref["name"], str(ref.get("scale", 1.0))]
+        elif LORA:
             cmd += ["--lora", LORA, LORA_SCALE]
         if QUANTIZE:
             cmd += ["--quantize", QUANTIZE]
@@ -253,7 +258,9 @@ class Handler(BaseHTTPRequestHandler):
                      width=int(body.get("width", 1024)),
                      height=int(body.get("height", 1024)),
                      steps=int(body["steps"]) if body.get("steps") else None,
-                     guidance=float(body["guidance"]) if body.get("guidance") else None)
+                     guidance=float(body["guidance"]) if body.get("guidance") else None,
+                     model=body.get("model"),
+                     loras=body.get("loras"))
             if path == "/edit":
                 if not body.get("init_image"):
                     raise TypeError("init_image required")
