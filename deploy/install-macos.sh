@@ -199,3 +199,7 @@ if [[ -x "$SPEECH_PYTHON" ]]; then
 else
   echo "note: speech venv not found at $SPEECH_PYTHON — skipping the speech sidecar."
 fi
+
+# The IOGPU wired-memory-limit daemon is a LaunchDaemon (system domain, root), so it is
+# installed by its own sudo script rather than here — this script runs without sudo.
+#   sudo ./deploy/install-iogpu.sh
