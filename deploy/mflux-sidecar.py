@@ -19,6 +19,8 @@ Design notes:
 
 Endpoints:
   GET  /health   -> {status, model, lora, quantize, bin}
+  GET  /status   -> {state: "idle"} | {state: "running", id, step, total, elapsed, cancelled}
+
   POST /generate -> {prompt, negative_prompt?, width?, height?, steps?, guidance?,
                      seed?} -> {image: b64, seed, width, height, seconds} | {error}
   POST /edit     -> same as /generate plus {init_image: b64, strength?}
@@ -27,6 +29,14 @@ Endpoints:
                      steps?, seed?}
   POST /pose     -> {prompt, image: b64, strength?, negative_prompt?, width?, height?,
                      steps?, guidance?, seed?, model?, loras?}
+
+  GET  /result/<id> -> the finished generation's PNG (raw bytes, "image/png"),
+                     404 when unknown. Every generation's output is persisted
+                     to RESULTS_DIR/<gen-id>.png (the `id` /status reports), so
+                     a client that dies mid-wait can re-attach and fetch the
+                     finished image instead of regenerating. GETs are not
+                     token-gated (only POSTs are): gen ids are uuid4, so this
+                     exposes nothing guessable.
 
 """
 
@@ -57,6 +67,14 @@ BIND = os.environ.get("MFLUX_BIND", "127.0.0.1")
 PORT = int(os.environ.get("MFLUX_PORT", "8899"))
 TOKEN = os.environ.get("MFLUX_TOKEN", "")  # optional shared secret
 GEN_TIMEOUT = int(os.environ.get("MFLUX_GEN_TIMEOUT", "3600"))
+
+# Persisted results: every generation writes its PNG to RESULTS_DIR/<gen-id>.png
+# rather than a tempdir, so an interrupted client can still fetch it (GET
+# /result/<id>). A sweep at startup and before each generation keeps the store
+# bounded: TTL first, then a newest-N count cap.
+RESULTS_DIR = os.path.expanduser(os.environ.get("MFLUX_RESULTS_DIR", "~/mflux-outputs"))
+RESULTS_TTL_HOURS = float(os.environ.get("MFLUX_RESULTS_TTL_HOURS", "24"))
+RESULTS_MAX = int(os.environ.get("MFLUX_RESULTS_MAX", "300"))
 
 FILL_BIN = os.environ.get("MFLUX_FILL_BIN", os.path.expanduser("~/.local/bin/mflux-generate-fill"))
 REDUX_BIN = os.environ.get("MFLUX_REDUX_BIN", os.path.expanduser("~/.local/bin/mflux-generate-redux"))
@@ -151,10 +169,48 @@ def _exec(cmd: list, out: str, state: dict) -> bytes:
         return fh.read()
 
 
+def _sweep_results() -> None:
+    """Keep the persisted results store bounded: delete files past the TTL,
+    then the oldest beyond a newest-N cap."""
+    try:
+        entries = [f for f in os.listdir(RESULTS_DIR) if f.endswith(".png")]
+    except OSError:
+        return
+
+    def _mtime(name: str) -> float:
+        try:
+            return os.path.getmtime(os.path.join(RESULTS_DIR, name))
+        except OSError:
+            return 0.0
+
+    entries.sort(key=_mtime)  # oldest first
+    now = time.time()
+    ttl = RESULTS_TTL_HOURS * 3600
+    kept = []
+    for f in entries:
+        if now - _mtime(f) > ttl:
+            try:
+                os.remove(os.path.join(RESULTS_DIR, f))
+            except OSError:
+                pass
+        else:
+            kept.append(f)
+    for f in kept[: max(0, len(kept) - RESULTS_MAX)]:
+        try:
+            os.remove(os.path.join(RESULTS_DIR, f))
+        except OSError:
+            pass
+
+
+def _result_path(state: dict) -> str:
+    """The persistent output path for this generation: results/<gen-id>.png."""
+    return os.path.join(RESULTS_DIR, str(state["id"]) + ".png")
+
+
 def run_generation(params: dict, state: dict) -> bytes:
     """Run one mflux-generate invocation; return the PNG bytes, or raise."""
+    out = _result_path(state)  # persisted; aux inputs still land in a tempdir
     with tempfile.TemporaryDirectory(prefix="mflux-") as td:
-        out = os.path.join(td, "out.png")
         model = params.get("model") or MODEL
         cmd = [BIN, "--model", model, "--output", out]
         loras = params.get("loras")
@@ -186,10 +242,10 @@ def run_generation(params: dict, state: dict) -> bytes:
 
 def run_fill(params: dict, state: dict) -> bytes:
     """Run one mflux-generate-fill invocation (masked inpainting)."""
+    out = _result_path(state)
     with tempfile.TemporaryDirectory(prefix="mflux-") as td:
         img_path = os.path.join(td, "image.png")
         mask_path = os.path.join(td, "mask.png")
-        out = os.path.join(td, "out.png")
         with open(img_path, "wb") as fh:
             fh.write(base64.b64decode(params["image"]))
         with open(mask_path, "wb") as fh:
@@ -221,7 +277,7 @@ def run_redux(params: dict, state: dict) -> bytes:
             with open(p, "wb") as fh:
                 fh.write(base64.b64decode(b64))
             paths.append(p)
-        out = os.path.join(td, "out.png")
+        out = _result_path(state)
 
         cmd = [
             REDUX_BIN,
@@ -243,9 +299,9 @@ def run_redux(params: dict, state: dict) -> bytes:
 
 def run_controlnet(params: dict, state: dict) -> bytes:
     """Run one mflux-generate-controlnet invocation (edge-guided pose)."""
+    out = _result_path(state)
     with tempfile.TemporaryDirectory(prefix="mflux-") as td:
         ref_path = os.path.join(td, "ref.png")
-        out = os.path.join(td, "out.png")
         with open(ref_path, "wb") as fh:
             fh.write(base64.b64decode(params["image"]))
 
@@ -311,6 +367,25 @@ class Handler(BaseHTTPRequestHandler):
                     "elapsed": round(time.time() - cur["started"], 1),
                     "cancelled": cur.get("cancelled", False),
                 })
+        elif self.path.startswith("/result/"):
+            gen_id = self.path[len("/result/"):].split("?")[0].rstrip("/")
+            # uuid4 hex only: doubles as the path-traversal guard for building
+            # the file path below.
+            if not re.fullmatch(r"[0-9a-f]{32}", gen_id or ""):
+                self._send_json(404, {"error": "not found"}); return
+            path = os.path.join(RESULTS_DIR, gen_id + ".png")
+            try:
+                with open(path, "rb") as fh:
+                    data = fh.read()
+            except FileNotFoundError:
+                self._send_json(404, {"error": "no result for this gen id"}); return
+            except OSError as exc:
+                self._send_json(500, {"error": str(exc)}); return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -343,6 +418,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if not _lock.acquire(blocking=False):
             self._send_json(409, {"error": "generation already in progress", "error_type": "busy"}); return
+
+        _sweep_results()  # inside the single-flight slot, so sweeps never interleave
 
         state = {
             "id": uuid.uuid4().hex,
@@ -463,7 +540,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"mflux sidecar on {BIND}:{PORT} model={MODEL} lora={LORA or '-'} quantize={QUANTIZE}", flush=True)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    _sweep_results()
+    print(
+        f"mflux sidecar on {BIND}:{PORT} model={MODEL} lora={LORA or '-'} quantize={QUANTIZE} "
+        f"results_dir={RESULTS_DIR}",
+        flush=True,
+    )
     ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()
 
 
