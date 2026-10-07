@@ -74,6 +74,70 @@ type ToolCall struct {
 	Function ToolFunction `json:"function"`
 }
 
+// ollamaArguments re-emits OpenAI-style arguments for Ollama's native
+// /api/chat. Ollama 0.34 parses the arguments text directly and rejects OpenAI's
+// JSON-encoded-string convention, failing the whole request with 400 "Value
+// looks like object, but can't find closing '}' symbol" whenever replayed
+// history carries string arguments, so every tool loop breaks on its second
+// turn. A valid-JSON arguments string re-emits verbatim as an object; anything
+// else degrades to an empty object so the request stays parseable.
+func ollamaArguments(raw string) json.RawMessage {
+	if json.Valid([]byte(raw)) {
+		return json.RawMessage(raw)
+	}
+	return json.RawMessage("{}")
+}
+
+// ollamaMessages normalizes an OpenAI-shaped history for Ollama's native
+// /api/chat by remapping tool-call arguments from the JSON-encoded strings the
+// OpenAI convention uses to the object shape Ollama requires (see
+// ollamaArguments). Messages without tool calls pass through unchanged.
+func ollamaMessages(messages []interface{}) []interface{} {
+	out := make([]interface{}, len(messages))
+	for i, rawMsg := range messages {
+		msg, ok := rawMsg.(map[string]interface{})
+		if !ok {
+			out[i] = rawMsg
+			continue
+		}
+		rawCalls, ok := msg["tool_calls"].([]interface{})
+		if !ok {
+			out[i] = rawMsg
+			continue
+		}
+		copyMsg := make(map[string]interface{}, len(msg))
+		for k, v := range msg {
+			copyMsg[k] = v
+		}
+		calls := make([]interface{}, len(rawCalls))
+		for j, rawCall := range rawCalls {
+			call, ok := rawCall.(map[string]interface{})
+			if !ok {
+				calls[j] = rawCall
+				continue
+			}
+			copyCall := make(map[string]interface{}, len(call))
+			for k, v := range call {
+				copyCall[k] = v
+			}
+			if fn, ok := copyCall["function"].(map[string]interface{}); ok {
+				copyFn := make(map[string]interface{}, len(fn))
+				for k, v := range fn {
+					copyFn[k] = v
+				}
+				if args, ok := fn["arguments"].(string); ok {
+					copyFn["arguments"] = ollamaArguments(args)
+				}
+				copyCall["function"] = copyFn
+			}
+			calls[j] = copyCall
+		}
+		copyMsg["tool_calls"] = calls
+		out[i] = copyMsg
+	}
+	return out
+}
+
 type Message struct {
 	Role      string     `json:"role"`
 	Content   string     `json:"content"`
@@ -606,7 +670,7 @@ func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, e
 	// from bloating memory.
 	ollamaReq := map[string]interface{}{
 		"model":    req.Model,
-		"messages": req.Messages,
+		"messages": ollamaMessages(req.Messages),
 		"tools":    req.Tools,
 		"stream":   false,
 		"think":    thinkRequested(req),
@@ -728,7 +792,7 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 
 	ollamaReq := map[string]interface{}{
 		"model":    req.Model,
-		"messages": req.Messages,
+		"messages": ollamaMessages(req.Messages),
 		"tools":    req.Tools,
 		"stream":   true,
 		"think":    thinkRequested(req),
