@@ -842,6 +842,7 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 	model := req.Model
 	promptTokens, completionTokens := 0, 0
 	var content, thinking, reasoning strings.Builder
+	toolCalls := make([]ToolCall, 0)
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
@@ -856,6 +857,14 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 				Content   string `json:"content"`
 				Thinking  string `json:"thinking"`
 				Reasoning string `json:"reasoning"`
+				// Same shape as the unary path: Ollama's arguments are an
+				// object, OpenAI clients expect a JSON-encoded string.
+				ToolCalls []struct {
+					Function struct {
+						Name      string          `json:"name"`
+						Arguments json.RawMessage `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"message"`
 			PromptEvalCount int  `json:"prompt_eval_count"`
 			EvalCount       int  `json:"eval_count"`
@@ -873,17 +882,37 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 		if ev.Message.Reasoning != "" {
 			reasoning.WriteString(ev.Message.Reasoning)
 		}
+
+		// Tool calls and done-adjacent content are handled before the done
+		// branch: Ollama's terminal event still carries the last content
+		// token, and breaking above the content handler dropped it.
+		for _, tc := range ev.Message.ToolCalls {
+			args := string(tc.Function.Arguments)
+			if args == "" || args == "null" {
+				args = "{}"
+			}
+			call := ToolCall{
+				ID:       fmt.Sprintf("call_%d", len(toolCalls)),
+				Type:     "function",
+				Function: ToolFunction{Name: tc.Function.Name, Arguments: args},
+			}
+			toolCalls = append(toolCalls, call)
+			writeSSEToolCallDelta(w, id, created, model, len(toolCalls)-1, call)
+		}
+		if len(ev.Message.ToolCalls) > 0 && flusher != nil {
+			flusher.Flush()
+		}
+
+		if ev.Message.Content != "" {
+			content.WriteString(ev.Message.Content)
+			writeSSEChunk(w, id, created, model, ev.Message.Content, "")
+		}
 		if ev.Done {
 			// Token counts only arrive with the terminal event in streaming mode.
 			promptTokens, completionTokens = ev.PromptEvalCount, ev.EvalCount
 			break
 		}
-		if ev.Message.Content == "" {
-			continue
-		}
-		content.WriteString(ev.Message.Content)
-		writeSSEChunk(w, id, created, model, ev.Message.Content, "")
-		if flusher != nil {
+		if flusher != nil && ev.Message.Content != "" {
 			flusher.Flush()
 		}
 	}
@@ -896,22 +925,29 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 	// now, at the end, so a model that also streamed real content never has its
 	// thinking interleaved into the reply.
 	assembled := content.String()
-	if strings.TrimSpace(assembled) == "" {
+	finish := "stop"
+	if len(toolCalls) > 0 {
+		// The client's tool loop branches on finish_reason; a tool-call
+		// answer must never end as "stop", or the agent ends its turn.
+		finish = "tool_calls"
+	} else if strings.TrimSpace(assembled) == "" {
 		if fallback := ollamaContent("", thinking.String(), reasoning.String()); fallback != "" {
 			writeSSEChunk(w, id, created, model, fallback, "")
-			if flusher != nil {
-				flusher.Flush()
-			}
 			assembled = fallback
 		}
 	}
 
 	// Terminate the stream cleanly even if Ollama's done event never arrived, so a
 	// streaming client always sees a finish_reason and [DONE] rather than a hang.
-	writeSSEChunk(w, id, created, model, "", "stop")
+	writeSSEChunk(w, id, created, model, "", finish)
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	if flusher != nil {
 		flusher.Flush()
+	}
+
+	msg := Message{Role: "assistant", Content: assembled}
+	if len(toolCalls) > 0 {
+		msg.ToolCalls = toolCalls
 	}
 
 	return &Response{
@@ -921,8 +957,8 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 		Model:   model,
 		Choices: []Choice{{
 			Index:        0,
-			Message:      Message{Role: "assistant", Content: assembled},
-			FinishReason: "stop",
+			Message:      msg,
+			FinishReason: finish,
 		}},
 		Usage: Usage{
 			PromptTokens:     promptTokens,
@@ -930,6 +966,26 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 			TotalTokens:      promptTokens + completionTokens,
 		},
 	}, true, nil
+}
+
+// writeSSEToolCallDelta emits the OpenAI streaming convention for tool calls: a
+// delta frame whose delta.tool_calls array carries one complete call. Ollama
+// emits each tool call whole in a single event, so one frame per call with the
+// full JSON-encoded arguments is the correct translation.
+func writeSSEToolCallDelta(w io.Writer, id string, created int64, model string, index int, tc ToolCall) {
+	chunk := map[string]interface{}{
+		"id":      id,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   model,
+		"choices": []map[string]interface{}{{
+			"index":         0,
+			"delta":         map[string]interface{}{"tool_calls": []interface{}{map[string]interface{}{"index": index, "id": tc.ID, "type": tc.Type, "function": tc.Function}}},
+			"finish_reason": nil,
+		}},
+	}
+	b, _ := json.Marshal(chunk)
+	fmt.Fprintf(w, "data: %s\n\n", b)
 }
 
 // writeSSEChunk emits one chat.completion.chunk event. finish is empty for a

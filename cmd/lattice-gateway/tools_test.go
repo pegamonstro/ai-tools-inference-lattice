@@ -199,6 +199,119 @@ func TestHistoryToolCallArgumentsAreSentAsOllamaObjects(t *testing.T) {
 	}
 }
 
+// Ollama streams tool calls as message.tool_calls events, with arguments as a
+// JSON object. A streaming agent turn that asks for a tool previously came back
+// empty because only content/thinking/reasoning were decoded; the stream path
+// must translate tool calls exactly like the unary path and finish with
+// "tool_calls" so the client's loop branches to the tool instead of ending.
+func TestStreamingToolCallsAreTranslatedToOpenAIDeltas(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body := `{"model":"granite4:3b","created_at":"t1","message":{"role":"assistant","content":""},"done":false}
+` + `{"model":"granite4:3b","created_at":"t2","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"list_files","arguments":{"path":"/tmp"}}}]},"done":false}
+` + `{"model":"granite4:3b","created_at":"t3","message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":11,"eval_count":3}`
+		w.Write([]byte(body))
+	}))
+	defer ollama.Close()
+
+	p := &OllamaProvider{Endpoint: ollama.URL}
+	rec := httptest.NewRecorder()
+	res, committed, err := p.ExecuteStream(context.Background(), Request{
+		Model:    "granite4:3b",
+		Messages: []interface{}{map[string]interface{}{"role": "user", "content": "list /tmp"}},
+		Tools:    []interface{}{map[string]interface{}{"type": "function"}},
+		Routing:  Routing{RequestID: "test-stream-tool"},
+	}, rec)
+	if err != nil {
+		t.Fatalf("ExecuteStream: %v", err)
+	}
+	if !committed {
+		t.Fatal("stream was not committed")
+	}
+
+	sse := rec.Body.String()
+	var toolFrame map[string]interface{}
+	for _, line := range strings.Split(sse, "\n") {
+		if !strings.HasPrefix(line, "data: ") || strings.Contains(line, "[DONE]") {
+			continue
+		}
+		var chunk map[string]interface{}
+		json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk)
+		ch, ok := chunk["choices"].([]interface{})
+		if !ok || len(ch) == 0 {
+			continue
+		}
+		delta := ch[0].(map[string]interface{})["delta"].(map[string]interface{})
+		if _, ok := delta["tool_calls"]; ok {
+			toolFrame = chunk
+		}
+	}
+	if toolFrame == nil {
+		t.Fatalf("no SSE frame carried a tool_calls delta; stream was:\n%s", sse)
+	}
+	d := toolFrame["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})
+	calls := d["tool_calls"].([]interface{})
+	if len(calls) != 1 {
+		t.Fatalf("delta carries %d tool calls, want 1", len(calls))
+	}
+	c0 := calls[0].(map[string]interface{})
+	if c0["id"] == "" || c0["type"] != "function" {
+		t.Errorf("tool call delta missing id/type: %v", c0)
+	}
+	fn := c0["function"].(map[string]interface{})
+	if fn["name"] != "list_files" {
+		t.Errorf("name = %v", fn["name"])
+	}
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(fn["arguments"].(string)), &args); err != nil {
+		t.Fatalf("streamed arguments are not a JSON string: %q (%v)", fn["arguments"], err)
+	}
+	if args["path"] != "/tmp" {
+		t.Errorf("arguments lost the payload: %v", args)
+	}
+
+	// The loop branches on finish_reason; an assembled Response must match too.
+	if got := res.Choices[0].FinishReason; got != "tool_calls" {
+		t.Errorf("assembled finish_reason = %q, want tool_calls", got)
+	}
+	if len(res.Choices[0].Message.ToolCalls) != 1 {
+		t.Errorf("assembled Response lost the tool call: %#v", res.Choices[0].Message)
+	}
+}
+
+// Streaming a plain-text answer must be untouched by the tool-call work: one
+// content delta plus the stop frame.
+func TestStreamingPlainTextStillStreams(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body := `{"model":"granite4:3b","created_at":"t1","message":{"role":"assistant","content":"hel"},"done":false}
+` + `{"model":"granite4:3b","created_at":"t2","message":{"role":"assistant","content":"lo"},"done":true,"prompt_eval_count":4,"eval_count":2}`
+		w.Write([]byte(body))
+	}))
+	defer ollama.Close()
+
+	p := &OllamaProvider{Endpoint: ollama.URL}
+	rec := httptest.NewRecorder()
+	res, _, err := p.ExecuteStream(context.Background(), Request{
+		Model:    "granite4:3b",
+		Messages: []interface{}{map[string]interface{}{"role": "user", "content": "hi"}},
+	}, rec)
+	if err != nil {
+		t.Fatalf("ExecuteStream: %v", err)
+	}
+	if res.Choices[0].Message.Content != "hello" {
+		t.Errorf("assembled content = %q, want hello", res.Choices[0].Message.Content)
+	}
+	if !strings.Contains(rec.Body.String(), `"content":"hel"`) ||
+		!strings.Contains(rec.Body.String(), `"content":"lo"`) {
+		t.Errorf("content deltas missing from SSE:\n%s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"finish_reason":"stop"`) ||
+		!strings.Contains(rec.Body.String(), "[DONE]") {
+		t.Errorf("terminal frames missing:\n%s", rec.Body.String())
+	}
+}
+
 // TestNoToolCallsLeavesHistoryUntouched pins the pass-through path: a history
 // without tool calls must serialize exactly as the client sent it.
 func TestNoToolCallsLeavesHistoryUntouched(t *testing.T) {
