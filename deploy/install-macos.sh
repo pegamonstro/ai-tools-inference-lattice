@@ -58,7 +58,35 @@ if [[ -n "$busy" ]]; then
 fi
 
 mkdir -p "$LOG_DIR" "$(dirname "$DEST")"
+
+# The gateway is unauthenticated, so what it binds decides who can reach it:
+# loopback for this host's own workloads, the tailnet address for the control
+# plane — never a wildcard. The tailnet address is detected from the Tailscale
+# CLI (standalone install or the GUI app bundle), falling back to a 100.x
+# interface address; an operator can always override with GATEWAY_BIND.
+GATEWAY_BIND="${GATEWAY_BIND:-}"
+if [[ -z "$GATEWAY_BIND" ]]; then
+  TS="$(command -v tailscale || true)"
+  if [[ -z "$TS" && -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]]; then
+    TS="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+  fi
+  TS_IP=""
+  [[ -n "$TS" ]] && TS_IP="$("$TS" ip -4 2>/dev/null || true)"
+  if [[ -z "$TS_IP" ]] && command -v ifconfig >/dev/null 2>&1; then
+    TS_IP="$(ifconfig 2>/dev/null | awk '$1 == "inet" && $2 ~ /^100\./ {print $2; exit}')"
+  fi
+  if [[ -n "$TS_IP" ]]; then
+    GATEWAY_BIND="127.0.0.1:8081,$TS_IP:8081"
+  else
+    echo "error: could not detect this Mac's tailnet address." >&2
+    echo "a wildcard bind would leave the gateway open; set one explicitly:" >&2
+    echo "  GATEWAY_BIND=127.0.0.1:8081,<tailnet-ip>:8081 ./deploy/install-macos.sh" >&2
+    exit 1
+  fi
+fi
+
 sed -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
+  -e "s|__GATEWAY_BIND__|$GATEWAY_BIND|g" \
   "$TEMPLATE" >"$DEST"
 
 launchctl bootstrap "$DOMAIN" "$DEST"
@@ -118,11 +146,18 @@ MFLUX_LABEL="com.lattice.mflux"
 MFLUX_TEMPLATE="$REPO_ROOT/deploy/$MFLUX_LABEL.plist.in"
 MFLUX_PYTHON="/usr/bin/python3"
 MFLUX_BIN="$HOME/.local/bin/mflux-generate"
-# The 4-bit model baked by `mflux-save --model schnell --quantize 4` (see the spec
-# and the M6 cutover notes). A username-path that must not be committed. The
-# uncensored Lustly LoRA (shauray/flux-uncensored-lora) is set in the plist
-# template's MFLUX_LORA and applied at inference time, not baked.
-MFLUX_MODEL="$HOME/mflux-models/flux-schnell-4bit"
+MFLUX_FILL_BIN="$HOME/.local/bin/mflux-generate-fill"
+MFLUX_REDUX_BIN="$HOME/.local/bin/mflux-generate-redux"
+# The 4-bit model baked by `mflux-save --model <path> --base-model dev --quantize 4`
+# (see the spec and the M6 cutover notes). A username-path that must not be
+# committed. This is Persephone 2.0 (Civitai #1775002), a dedicated NSFW
+# FLUX.1-dev transformer fine-tune baked in place of dev's weights — no LoRA.
+MFLUX_MODEL="$HOME/mflux-models/persephone-4bit"
+# Baked 4-bit fill/redux models (mflux-save --model dev-fill / dev-redux --quantize 4).
+# Their quantize env vars stay empty — the models are already 4-bit, and the sidecar
+# passes --model <path> (no --base-model) + --vae-tiling for the 1024² decode.
+MFLUX_FILL_MODEL="$HOME/mflux-models/flux-fill-dev-4bit"
+MFLUX_REDUX_MODEL="$HOME/mflux-models/flux-redux-dev-4bit"
 MFLUX_DEST="$HOME/Library/LaunchAgents/$MFLUX_LABEL.plist"
 
 if [[ -x "$MFLUX_BIN" ]]; then
@@ -138,7 +173,7 @@ if [[ -x "$MFLUX_BIN" ]]; then
       fi
     done
   fi
-  sed -e "s|__MFLUX_PYTHON__|$MFLUX_PYTHON|g" -e "s|__MFLUX_BIN__|$MFLUX_BIN|g" -e "s|__MFLUX_MODEL__|$MFLUX_MODEL|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
+  sed -e "s|__MFLUX_PYTHON__|$MFLUX_PYTHON|g" -e "s|__MFLUX_BIN__|$MFLUX_BIN|g" -e "s|__MFLUX_FILL_BIN__|$MFLUX_FILL_BIN|g" -e "s|__MFLUX_REDUX_BIN__|$MFLUX_REDUX_BIN|g" -e "s|__MFLUX_MODEL__|$MFLUX_MODEL|g" -e "s|__MFLUX_FILL_MODEL__|$MFLUX_FILL_MODEL|g" -e "s|__MFLUX_REDUX_MODEL__|$MFLUX_REDUX_MODEL|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
     "$MFLUX_TEMPLATE" >"$MFLUX_DEST"
   launchctl bootstrap "$DOMAIN" "$MFLUX_DEST"
   if launchctl print "$DOMAIN/$MFLUX_LABEL" >/dev/null 2>&1; then
@@ -192,3 +227,45 @@ if [[ -x "$SPEECH_PYTHON" ]]; then
 else
   echo "note: speech venv not found at $SPEECH_PYTHON — skipping the speech sidecar."
 fi
+
+# The ESRGAN sidecar — the local Real-ESRGAN super-resolution backend for img-gen's
+# "Upscale (4x)" mode. Like mflux it is optional and only supervised when its CLI
+# (a uv-tool shim, a username-path that must not be committed) is present. It is a
+# separate service from mflux because upscaling is a distinct, deterministic pass
+# with its own single-flight lifecycle and 4x RAM profile.
+ESRGAN_LABEL="com.lattice.esrgan"
+ESRGAN_TEMPLATE="$REPO_ROOT/deploy/$ESRGAN_LABEL.plist.in"
+ESRGAN_PYTHON="/usr/bin/python3"
+ESRGAN_BIN="$HOME/.local/bin/realesrgan-mlx"
+ESRGAN_DEST="$HOME/Library/LaunchAgents/$ESRGAN_LABEL.plist"
+
+if [[ -x "$ESRGAN_BIN" ]]; then
+  launchctl bootout "$DOMAIN/$ESRGAN_LABEL" 2>/dev/null || true
+  busy="$(lsof -nP -iTCP:8901 -sTCP:LISTEN -t 2>/dev/null || true)"
+  if [[ -n "$busy" ]]; then
+    for pid in $busy; do
+      if [[ "$(ps -o command= -p "$pid" 2>/dev/null)" == *esrgan-sidecar.py* ]]; then
+        echo "error: an unmanaged esrgan sidecar (pid $pid) is holding :8901." >&2
+        echo "stop it, then re-run this script:" >&2
+        echo "  kill $pid" >&2
+        exit 1
+      fi
+    done
+  fi
+  sed -e "s|__ESRGAN_PYTHON__|$ESRGAN_PYTHON|g" -e "s|__ESRGAN_BIN__|$ESRGAN_BIN|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
+    "$ESRGAN_TEMPLATE" >"$ESRGAN_DEST"
+  launchctl bootstrap "$DOMAIN" "$ESRGAN_DEST"
+  if launchctl print "$DOMAIN/$ESRGAN_LABEL" >/dev/null 2>&1; then
+    echo "installed: $ESRGAN_DEST"
+    echo "running  : $DOMAIN/$ESRGAN_LABEL"
+    echo "logs     : $LOG_DIR/lattice-esrgan.{out,err}.log"
+  else
+    echo "warning: esrgan bootstrap failed — check $LOG_DIR/lattice-esrgan.err.log" >&2
+  fi
+else
+  echo "note: realesrgan-mlx not found at $ESRGAN_BIN — skipping the esrgan sidecar."
+fi
+
+# The IOGPU wired-memory-limit daemon is a LaunchDaemon (system domain, root), so it is
+# installed by its own sudo script rather than here — this script runs without sudo.
+#   sudo ./deploy/install-iogpu.sh

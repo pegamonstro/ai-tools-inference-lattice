@@ -239,7 +239,7 @@ var (
 	}{
 		// general → MoE (fast, few active params per token); coding → dense
 		// (full attention, 32 K context). Measured 2026-09-28, docs/measurements.md.
-		"local-brain": {local: "granite3-moe:3b", cloud: "gemma4:31b-cloud"},
+		"local-brain": {local: "gemma4:12b", cloud: "gemma4:31b-cloud"},
 		"local-coder": {local: "qwen2.5-coder:3b", cloud: "deepseek-v4-pro:cloud"},
 	}
 

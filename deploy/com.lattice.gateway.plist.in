@@ -34,6 +34,13 @@
     <dict>
         <key>LATTICE_GATEWAY_PROVIDERS</key>
         <string>__REPO_ROOT__/deploy/gateway-providers.json</string>
+        <!--
+          The gateway is unauthenticated, so this bind is the whole access
+          policy: loopback for the host's own workloads, the tailnet address for
+          the control plane. Never a wildcard.
+        -->
+        <key>LATTICE_GATEWAY_BIND</key>
+        <string>__GATEWAY_BIND__</string>
     </dict>
 
     <key>RunAtLoad</key>

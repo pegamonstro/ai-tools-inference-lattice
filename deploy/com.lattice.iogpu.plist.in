@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lattice IOGPU wired-memory-limit LaunchDaemon — system domain (runs as root at boot).
+
+  Raises the IOGPU (Apple Silicon GPU) wired-memory ceiling so image generation and LLM
+  inference can pin more unified memory before the OS reclaims it. The default
+  (iogpu.wired_limit_mb=0) lets the AGX driver pick a conservative ceiling; on a 32 GiB
+  host that leaves GPU-heavy diffusion + LLM workloads thrashing to swap (see the M6
+  benchmark notes). __IOGPU_WIRED_LIMIT_MB__ is the explicit ceiling in MiB.
+
+  Unlike the gateway/mlx/mflux/speech agents this is a LaunchDaemon, not a LaunchAgent:
+  `sysctl -w iogpu.wired_limit_mb` needs root, and it must run once at boot before any
+  user session. install-iogpu.sh (run with sudo) substitutes the placeholder and
+  bootstraps it into the system domain. The value is a number, not a path, so no
+  username substitution is needed — but it is still templated so install-iogpu.sh can
+  apply an IOGPU_WIRED_LIMIT_MB override without editing the committed plist.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lattice.iogpu</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/sbin/sysctl</string>
+        <string>-w</string>
+        <string>iogpu.wired_limit_mb=__IOGPU_WIRED_LIMIT_MB__</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

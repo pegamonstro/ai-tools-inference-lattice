@@ -13,13 +13,18 @@
   ~/Library/LaunchAgents/, the same username-free substitution step as the gateway
   and mlx agents. MFLUX_MODEL points at the baked 4-bit model (mflux-save output,
   see the spec), so MFLUX_QUANTIZE is empty and MFLUX_EXTRA_ARGS carries the
-  --base-model schnell flag the bake requires, plus --no-bake-lora (the default
+  --base-model dev flag the bake requires, plus --no-bake-lora (the default
   --bake-lora merges the LoRA into fp16 and OOMs even 32 GB) and --vae-tiling (a
   full-res 1024² VAE decode OOMs the Metal command buffer without it — see the M6
-  benchmark notes). MFLUX_LORA is the Lustly.ai uncensored LoRA; it is applied at
-  inference time, not baked. Note the LoRA is dev-trained but FLUX.1-dev and
-  -schnell share an architecture, so it applies to schnell too — the uncensoring
-  effect is weaker/less faithful on the distilled model, and dev is the fallback.
+  benchmark notes). MFLUX_LORA is empty: the model is Persephone 2.0, a dedicated
+  NSFW fine-tune of FLUX.1-dev (Civitai #1775002) whose transformer weights are
+  baked in place of dev's — a LoRA on dev cannot produce explicit output.
+  MFLUX_FILL_MODEL and MFLUX_REDUX_MODEL point at the baked 4-bit fill/redux models
+  (mflux-save --model dev-fill / dev-redux --quantize 4), so MFLUX_FILL_QUANTIZE and
+  MFLUX_REDUX_QUANTIZE are likewise empty. The fill/redux CLIs hardcode their
+  model_config (dev-fill / dev-redux), so unlike generate they need no --base-model:
+  --model <path> alone selects the baked weights, and the sidecar passes --vae-tiling
+  for the same 1024² VAE decode as generate.
   MFLUX_BIN is the uv-tool shim that runs mflux-generate (the sidecar itself is
   stdlib Python and shells out to it).
   MFLUX_BIND must be 0.0.0.0 so the Pi can reach it over the tailnet; the sidecar is
@@ -40,20 +45,32 @@
     <dict>
         <key>MFLUX_BIN</key>
         <string>__MFLUX_BIN__</string>
+        <key>MFLUX_FILL_BIN</key>
+        <string>__MFLUX_FILL_BIN__</string>
+        <key>MFLUX_REDUX_BIN</key>
+        <string>__MFLUX_REDUX_BIN__</string>
         <key>MFLUX_MODEL</key>
         <string>__MFLUX_MODEL__</string>
+        <key>MFLUX_FILL_MODEL</key>
+        <string>__MFLUX_FILL_MODEL__</string>
+        <key>MFLUX_REDUX_MODEL</key>
+        <string>__MFLUX_REDUX_MODEL__</string>
         <key>MFLUX_LORA</key>
-        <string>shauray/flux-uncensored-lora</string>
+        <string></string>
         <key>MFLUX_LORA_SCALE</key>
         <string>1.0</string>
         <key>MFLUX_QUANTIZE</key>
+        <string></string>
+        <key>MFLUX_FILL_QUANTIZE</key>
+        <string></string>
+        <key>MFLUX_REDUX_QUANTIZE</key>
         <string></string>
         <key>MFLUX_BIND</key>
         <string>0.0.0.0</string>
         <key>MFLUX_PORT</key>
         <string>8899</string>
         <key>MFLUX_EXTRA_ARGS</key>
-        <string>--base-model schnell --no-bake-lora --vae-tiling</string>
+        <string>--base-model dev --no-bake-lora --vae-tiling</string>
     </dict>
 
     <key>RunAtLoad</key>

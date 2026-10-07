@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -82,6 +83,7 @@ type Telemetry struct {
 	Target        string  `json:"target"`
 	Locality      string  `json:"locality"`
 	Model         string  `json:"model,omitempty"`
+	Client        string  `json:"client,omitempty"`
 	Error         string  `json:"error,omitempty"`
 }
 
@@ -205,8 +207,20 @@ func handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 	proxyInference(w, r, "/v1/audio/speech", false)
 }
 
+// remoteHost strips the port an address rides on. A client's identity for
+// attribution is where it connected from, not which ephemeral port it used.
+func remoteHost(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
+}
+
 func proxyInference(w http.ResponseWriter, r *http.Request, upstreamPath string, injectRouting bool) {
 	tTotalStart := time.Now()
+	// Captured before anything can move r: every telemetry row from this request
+	// must say who asked, or attribution dies at the first error path.
+	caller := remoteHost(r.RemoteAddr)
 
 	var req Request
 	var tExecStart time.Time
@@ -215,7 +229,7 @@ func proxyInference(w http.ResponseWriter, r *http.Request, upstreamPath string,
 	// write to the client fails, and a client that disconnects mid-response would
 	// take a trailing line with the unwind. Deferring also covers the refusal
 	// paths — and a refusal is the event the routing policy exists to produce.
-	tele := Telemetry{}
+	tele := Telemetry{Client: caller}
 	defer func() {
 		// Keyed even when the body never parsed: a line the display cannot group
 		// is a line it cannot show, and an unparsable body is worth showing.
@@ -256,7 +270,17 @@ func proxyInference(w http.ResponseWriter, r *http.Request, upstreamPath string,
 
 	// HARDENING: Add timeout to Control Plane call
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(controlURL, "application/json", bytes.NewBuffer(decisionReq))
+	routeReq, err := http.NewRequestWithContext(r.Context(), "POST", controlURL, bytes.NewBuffer(decisionReq))
+	if err != nil {
+		tele.Error = "control plane unavailable or timed out"
+		http.Error(w, "Control plane unavailable or timed out", http.StatusServiceUnavailable)
+		return
+	}
+	routeReq.Header.Set("Content-Type", "application/json")
+	// Control records the same caller this frontend serves, so a decision
+	// and its downstream gateway rows attribute to one client.
+	routeReq.Header.Set("X-Lattice-Client", caller)
+	resp, err := client.Do(routeReq)
 	if err != nil {
 		tele.Error = "control plane unavailable or timed out"
 		http.Error(w, "Control plane unavailable or timed out", http.StatusServiceUnavailable)
@@ -307,6 +331,12 @@ func proxyInference(w http.ResponseWriter, r *http.Request, upstreamPath string,
 	// envelope, so without this header its gateway line would be unkeyed and the
 	// request would be correlatable in two planes out of three.
 	r.Header.Set("X-Request-Id", req.Routing.RequestID)
+
+	// Always overwritten, never trusted from the incoming request: the gateway
+	// should attribute the connection it actually serves, and this proxy is the
+	// only one positioned to say so. Leaving a client-supplied value in place
+	// would let a caller forge its own attribution.
+	r.Header.Set("X-Lattice-Client", caller)
 
 	w.Header().Set("X-Request-Id", req.Routing.RequestID)
 

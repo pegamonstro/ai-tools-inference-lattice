@@ -106,7 +106,7 @@ func TestResolveModel(t *testing.T) {
 		target string
 		want   string
 	}{
-		{"alias resolves to the local model", "local-brain", "local", "granite3-moe:3b"},
+		{"alias resolves to the local model", "local-brain", "local", "gemma4:12b"},
 		{"alias resolves to the cloud model", "local-brain", "cloud", "gemma4:31b-cloud"},
 		{"second alias resolves locally", "local-coder", "local", "qwen2.5-coder:3b"},
 		{"second alias resolves on cloud", "local-coder", "cloud", "deepseek-v4-pro:cloud"},
