@@ -166,6 +166,21 @@ type ImageRequest struct {
 	// Mask is carried only so a request that sends one fails loudly instead of
 	// being silently dropped: the mflux sidecar has no mask support.
 	Mask string `json:"mask"`
+	// Loras is a Lattice extension, not an OpenAI field: optional LoRA refs the
+	// sidecar applies at inference time (the sidecar takes [{name, scale}]).
+	Loras []ImageLora `json:"loras,omitempty"`
+	// SidecarModel is not client-owned: handleImage fills it from the registry's
+	// upstream mapping when the requested image model names one, and it is what
+	// selects the model the sidecar loads. Empty keeps the sidecar's env-default
+	// model — a client-sent model field is never trusted.
+	SidecarModel string `json:"-"`
+}
+
+// ImageLora is one LoRA reference in the sidecar's shape. Scale is the
+// inference-time weight; 1.0 means full strength.
+type ImageLora struct {
+	Name  string  `json:"name"`
+	Scale float64 `json:"scale"`
 }
 
 type ImageResponse struct {
@@ -1491,6 +1506,11 @@ func handleImage(w http.ResponseWriter, r *http.Request, op string) {
 	defer inferenceSlots.release()
 
 	providerName, _ := resolveModel(img.Model)
+	if registry != nil {
+		if u, ok := registry.modelUpstream[img.Model]; ok && u != "" {
+			img.SidecarModel = u
+		}
+	}
 	providerMutex.RLock()
 	provider := providers[providerName]
 	providerMutex.RUnlock()

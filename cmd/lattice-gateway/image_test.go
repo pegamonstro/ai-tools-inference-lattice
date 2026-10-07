@@ -158,3 +158,120 @@ func TestRouterServesImageRoutes(t *testing.T) {
 		}
 	}
 }
+
+// An image model with an upstream mapping names a host-local bake the sidecar
+// must load; the mapping must ride the request as the sidecar's model field.
+func TestHandleImageRoutesTheSidecarModelFromUpstream(t *testing.T) {
+	var sawBody map[string]interface{}
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&sawBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"image":"aW1hZ2U=","seed":1,"width":512,"height":512,"seconds":1.0}`))
+	}))
+	defer sidecar.Close()
+
+	path := t.TempDir() + "/telemetry-gateway.jsonl"
+	t.Setenv("LATTICE_GATEWAY_TELEMETRY", path)
+	t.Setenv("LATTICE_GATEWAY_IMAGE_MARGIN_MB", "1")
+
+	oldBudgeter, oldProviders, oldRegistry := budgeter, providers, registry
+	budgeter = &MemoryBudgeter{safeMargin: 0, pageSize: 4096}
+	providers = map[string]Provider{"mflux": &MfluxProvider{Endpoint: sidecar.URL}}
+	registry = &providerRegistry{
+		modelProviders: map[string]string{"flux-uncensored": "mflux"},
+		modelUpstream:  map[string]string{"flux-uncensored": "/models/persephone-4bit"},
+	}
+	defer func() { budgeter, providers, registry = oldBudgeter, oldProviders, oldRegistry }()
+
+	req := httptest.NewRequest("POST", "/v1/images/generations",
+		strings.NewReader(`{"model":"flux-uncensored","prompt":"a cat","size":"512x512","n":1}`))
+	req.Header.Set("X-Request-Id", "req-img-upstream")
+	rec := httptest.NewRecorder()
+	handleImageGenerations(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if sawBody["model"] != "/models/persephone-4bit" {
+		t.Errorf("upstream did not arrive as sidecar model: %v", sawBody["model"])
+	}
+}
+
+// A model without an upstream mapping keeps the sidecar on its env-default
+// model: forwarding the registry name would send mflux a path it cannot
+// resolve. The client-sent model field is likewise never trusted.
+func TestHandleImageDoesNotForwardAModelWithoutAnUpstream(t *testing.T) {
+	var sawBody map[string]interface{}
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&sawBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"image":"aW1hZ2U=","seed":1,"width":512,"height":512,"seconds":1.0}`))
+	}))
+	defer sidecar.Close()
+
+	path := t.TempDir() + "/telemetry-gateway.jsonl"
+	t.Setenv("LATTICE_GATEWAY_TELEMETRY", path)
+	t.Setenv("LATTICE_GATEWAY_IMAGE_MARGIN_MB", "1")
+
+	oldBudgeter, oldProviders, oldRegistry := budgeter, providers, registry
+	budgeter = &MemoryBudgeter{safeMargin: 0, pageSize: 4096}
+	providers = map[string]Provider{"mflux": &MfluxProvider{Endpoint: sidecar.URL}}
+	registry = &providerRegistry{modelProviders: map[string]string{"flux-dev": "mflux"}}
+	defer func() { budgeter, providers, registry = oldBudgeter, oldProviders, oldRegistry }()
+
+	req := httptest.NewRequest("POST", "/v1/images/generations",
+		strings.NewReader(`{"model":"flux-dev","prompt":"a cat","size":"512x512","n":1}`))
+	req.Header.Set("X-Request-Id", "req-img-noupstream")
+	rec := httptest.NewRecorder()
+	handleImageGenerations(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if _, ok := sawBody["model"]; ok {
+		t.Errorf("model forwarded without an upstream mapping: %v", sawBody["model"])
+	}
+	if _, ok := sawBody["loras"]; ok {
+		t.Errorf("loras forwarded when the client sent none: %v", sawBody["loras"])
+	}
+}
+
+// Lora refs are a Lattice extension on the images body; they must reach the
+// sidecar in its [{name, scale}] shape.
+func TestHandleImageForwardsLoras(t *testing.T) {
+	var sawBody map[string]interface{}
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&sawBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"image":"aW1hZ2U=","seed":1,"width":512,"height":512,"seconds":1.0}`))
+	}))
+	defer sidecar.Close()
+
+	path := t.TempDir() + "/telemetry-gateway.jsonl"
+	t.Setenv("LATTICE_GATEWAY_TELEMETRY", path)
+	t.Setenv("LATTICE_GATEWAY_IMAGE_MARGIN_MB", "1")
+
+	oldBudgeter, oldProviders, oldRegistry := budgeter, providers, registry
+	budgeter = &MemoryBudgeter{safeMargin: 0, pageSize: 4096}
+	providers = map[string]Provider{"mflux": &MfluxProvider{Endpoint: sidecar.URL}}
+	registry = &providerRegistry{modelProviders: map[string]string{"flux-dev": "mflux"}}
+	defer func() { budgeter, providers, registry = oldBudgeter, oldProviders, oldRegistry }()
+
+	req := httptest.NewRequest("POST", "/v1/images/generations",
+		strings.NewReader(`{"model":"flux-dev","prompt":"a cat","size":"512x512","n":1,"loras":[{"name":"lustly","scale":0.8}]}`))
+	req.Header.Set("X-Request-Id", "req-img-loras")
+	rec := httptest.NewRecorder()
+	handleImageGenerations(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var loras []ImageLora
+	b, _ := json.Marshal(sawBody["loras"])
+	if err := json.Unmarshal(b, &loras); err != nil || len(loras) != 1 {
+		t.Fatalf("loras did not arrive: %s (%v)", b, err)
+	}
+	if loras[0].Name != "lustly" || loras[0].Scale != 0.8 {
+		t.Errorf("loras = %+v, want [{lustly 0.8}]", loras)
+	}
+}

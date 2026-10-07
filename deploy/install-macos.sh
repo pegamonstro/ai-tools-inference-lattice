@@ -187,6 +187,49 @@ else
   echo "note: mflux-generate not found at $MFLUX_BIN — skipping the mflux sidecar."
 fi
 
+# The Z-IMAGE sidecar — a second instance of the same stdlib sidecar fronting
+# mflux-generate-z-image-turbo. The sidecar shells one image CLI per instance and
+# Z-Image is a different CLI family from the FLUX bin, so it gets its own
+# listener (:8898); the gateway maps the model to it as an ordinary kind-mflux
+# provider (deploy/gateway-providers.json). Optional and supervised only when the
+# Z-Image CLI is present, exactly like the FLUX sidecar above.
+MFLUX_ZIMAGE_LABEL="com.lattice.mflux-zimage"
+MFLUX_ZIMAGE_TEMPLATE="$REPO_ROOT/deploy/$MFLUX_ZIMAGE_LABEL.plist.in"
+MFLUX_ZIMAGE_PYTHON="/usr/bin/python3"
+MFLUX_ZIMAGE_BIN="$HOME/.local/bin/mflux-generate-z-image-turbo"
+# Pre-quantized 4-bit Z-Image-Turbo (public, non-gated): already 4-bit, so
+# MFLUX_QUANTIZE stays empty and --base-model names the family for the shim.
+MFLUX_ZIMAGE_MODEL="filipstrand/Z-Image-Turbo-mflux-4bit"
+MFLUX_ZIMAGE_EXTRA="--base-model z-image-turbo --vae-tiling"
+MFLUX_ZIMAGE_DEST="$HOME/Library/LaunchAgents/$MFLUX_ZIMAGE_LABEL.plist"
+
+if [[ -x "$MFLUX_ZIMAGE_BIN" ]]; then
+  launchctl bootout "$DOMAIN/$MFLUX_ZIMAGE_LABEL" 2>/dev/null || true
+  busy="$(lsof -nP -iTCP:8898 -sTCP:LISTEN -t 2>/dev/null || true)"
+  if [[ -n "$busy" ]]; then
+    for pid in $busy; do
+      if [[ "$(ps -o command= -p "$pid" 2>/dev/null)" == *mflux-sidecar.py* ]]; then
+        echo "error: an unmanaged mflux sidecar (pid $pid) is holding :8898." >&2
+        echo "stop it, then re-run this script:" >&2
+        echo "  kill $pid" >&2
+        exit 1
+      fi
+    done
+  fi
+  sed -e "s|__MFLUX_ZPYTHON__|$MFLUX_ZIMAGE_PYTHON|g" -e "s|__MFLUX_ZBIN__|$MFLUX_ZIMAGE_BIN|g" -e "s|__MFLUX_ZMODEL__|$MFLUX_ZIMAGE_MODEL|g" -e "s|__MFLUX_ZEXTRA__|$MFLUX_ZIMAGE_EXTRA|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
+    "$MFLUX_ZIMAGE_TEMPLATE" >"$MFLUX_ZIMAGE_DEST"
+  launchctl bootstrap "$DOMAIN" "$MFLUX_ZIMAGE_DEST"
+  if launchctl print "$DOMAIN/$MFLUX_ZIMAGE_LABEL" >/dev/null 2>&1; then
+    echo "installed: $MFLUX_ZIMAGE_DEST"
+    echo "running  : $DOMAIN/$MFLUX_ZIMAGE_LABEL"
+    echo "logs     : $LOG_DIR/lattice-mflux-zimage.{out,err}.log"
+  else
+    echo "warning: z-image bootstrap failed — check $LOG_DIR/lattice-mflux-zimage.err.log" >&2
+  fi
+else
+  echo "note: mflux-generate-z-image-turbo not found at $MFLUX_ZIMAGE_BIN — skipping the z-image sidecar."
+fi
+
 # The SPEECH sidecar — the local kokoro-mlx (TTS) + mlx-whisper (STT) backend for
 # the gateway's "speech" provider. Like mflux it is optional and only supervised
 # when its venv (a username-path that must not be committed) is present. It binds

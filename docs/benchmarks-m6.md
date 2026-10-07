@@ -360,3 +360,31 @@ measured by `llama-server` RSS + `sysctl vm.swapusage`.
   (the `LATTICE_GATEWAY_MAX_CONTEXT` default), min'd across gateways by the control
   plane, and does not express per-model ceilings. The per-model `context` override
   is what actually governs serving; the announcement is informational.
+
+## Multi-model image placement — prequant z-image + qwen-image-2.1 (round 6)
+
+Goal: place the uncensored model zoo across M1 (16 GB) and M6 (32 GB) and wire
+every model through the gateway (see `docs/specs/lattice-image-multi-model.md`).
+Prequantized HF repos, no baking; measurement as round 4 (mflux's own Peak MLX
+line, `sysctl vm.swapusage` deltas).
+
+| model (repo) | host | steps @512² | wall | per-step | peak MLX | swap Δ |
+|---|---|---|---|---|---|---|
+| Z-Image-Turbo 4-bit (`filipstrand/Z-Image-Turbo-mflux-4bit`) | M6 | 4 | 6 s | 1.37 s | **5.63 GB** | 0 |
+| Z-Image-Turbo 4-bit (same) | M1 | 4 | 1:37 / 1:45 | 23.8 s | **5.63 GB** | **0** (3846.19 MB used before and after) |
+| Qwen-Image-2.1 4-bit (`OsaurusAI/Qwen-Image-2.1-mflux-4bit`) | M6 | 4 | 9 s | ~2.0 s | **10.00 GB** | 0 |
+
+- **Quantization is the placement lever, again.** The fp16 Z-Image-Turbo measured
+  26.73 GB (round above, M6-exclusive); its 4-bit prequant peaks at the same
+  5.63 GB on both hosts. The per-step gap (1.37 s on M6 vs 23.8 s on M1) is
+  compute-side, not memory-side — the M1 held zero swap delta under `--low-ram`
+  while Ollama-era swap residue (3.8 GB) stayed untouched.
+- **Qwen-Image-2.1 is M6-exclusive by measurement** (10 GB peak — the 16 GB M1
+  cannot take it with anything resident).
+- Each architecture's CLI entry point remains the rule from the first
+  z-image round (`mflux-generate-qwen-2.1`, `--base-model qwen-image-2.1`,
+  `--base-model z-image-turbo` verified with third-party prequant repos).
+- End-to-end through the lattice from the Pi: all three image models
+  (`z-image-turbo`, `qwen-image-2.1`, `flux-uncensored`) returned valid images
+  via the frontend → control → gateway → sidecar chain, control telemetry
+  `target:"m6-gateway", locality:"local"`.

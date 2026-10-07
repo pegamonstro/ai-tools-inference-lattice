@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lattice MFLUX Z-IMAGE sidecar — macOS LaunchAgent template.
+
+  A second instance of the same stdlib sidecar (deploy/mflux-sidecar.py) fronting
+  mflux-generate-z-image-turbo instead of the FLUX bin. The sidecar shells exactly
+  one image CLI per instance and Z-Image is a different CLI from mflux-generate,
+  so it gets its own listener (:8898) and the gateway maps the model to it as an
+  ordinary kind-mflux provider. See docs/specs/lattice-image-generation.md for the
+  sidecar contract and docs/specs/lattice-image-multi-model.md for placement.
+
+  MFLUX_BIN is the Z-Image CLI shim (uv tool at ~/.local/bin, or a venv path on
+  hosts that install mflux that way). MFLUX_MODEL is the pre-quantized 4-bit
+  Z-Image-Turbo repo (weights are already 4-bit, so MFLUX_QUANTIZE stays empty).
+  MFLUX_EXTRA_ARGS names the family the third-party weights are based on
+  (--base-model z-image-turbo), which mflux requires for non-built-in models;
+  --vae-tiling keeps the 1024² VAE decode inside the Metal command buffer.
+  MFLUX_BIND must be 0.0.0.0 so the Pi can reach it over the tailnet; the sidecar
+  is unauthenticated (single-user homelab trust model, spec §Security).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lattice.mflux-zimage</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__MFLUX_ZPYTHON__</string>
+        <string>__REPO_ROOT__/deploy/mflux-sidecar.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MFLUX_BIN</key>
+        <string>__MFLUX_ZBIN__</string>
+        <key>MFLUX_MODEL</key>
+        <string>__MFLUX_ZMODEL__</string>
+        <key>MFLUX_LORA</key>
+        <string></string>
+        <key>MFLUX_LORA_SCALE</key>
+        <string>1.0</string>
+        <key>MFLUX_QUANTIZE</key>
+        <string></string>
+        <key>MFLUX_BIND</key>
+        <string>0.0.0.0</string>
+        <key>MFLUX_PORT</key>
+        <string>8898</string>
+        <key>MFLUX_EXTRA_ARGS</key>
+        <string>__MFLUX_ZEXTRA__</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/lattice-mflux-zimage.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/lattice-mflux-zimage.err.log</string>
+</dict>
+</plist>

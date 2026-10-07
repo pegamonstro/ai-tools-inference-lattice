@@ -490,6 +490,12 @@ func (p *MfluxProvider) oneImage(ctx context.Context, req ImageRequest, op strin
 		"width":  width,
 		"height": height,
 	}
+	if req.SidecarModel != "" {
+		body["model"] = req.SidecarModel
+	}
+	if len(req.Loras) > 0 {
+		body["loras"] = req.Loras
+	}
 	if op == "edit" {
 		body["init_image"] = req.Image
 	}
