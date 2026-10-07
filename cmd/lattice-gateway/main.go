@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -36,6 +37,11 @@ type Request struct {
 	Tools      []interface{} `json:"tools,omitempty"`
 	ToolChoice interface{}   `json:"tool_choice,omitempty"`
 	Routing    Routing       `json:"routing"`
+	// Think, when non-nil, overrides whether the native Ollama request asks a
+	// thinking model for its think channel. It is a pointer so an absent field
+	// (nil, the default of think: false) is distinguishable from an explicit
+	// true. routing.provider_params["think"] is honoured as a second override.
+	Think *bool `json:"think,omitempty"`
 }
 
 type Response struct {
@@ -145,11 +151,36 @@ type Telemetry struct {
 	Elapsed          float64 `json:"elapsed_s"`
 	PromptTokens     int     `json:"prompt_tokens"`
 	CompletionTokens int     `json:"completion_tokens"`
+	// Client is stamped in logTelemetry from the argument every call site passes,
+	// so a handler cannot forget attribution (the compiler enforces that no call
+	// site exists without a client). Direct dials attribute as the dialer's
+	// address; relayed requests carry the frontend's X-Lattice-Client, which is
+	// the original caller the lattice actually served.
+	Client string `json:"client,omitempty"`
 	// Locality is stamped in logTelemetry, not by callers: this process is the
 	// local executor, so the value is constant, and setting it in one place makes
 	// it true by construction at every call site.
 	Locality string `json:"locality"`
 	Error    string `json:"error,omitempty"`
+}
+
+// clientID resolves who to attribute an inference to. The frontend's forwarded
+// header wins because it observed the real caller; anything else is the peer
+// address of the connection that reached this gateway.
+func callerID(r *http.Request) string {
+	if c := r.Header.Get("X-Lattice-Client"); c != "" {
+		return c
+	}
+	return remoteHost(r.RemoteAddr)
+}
+
+// remoteHost strips the port an address rides on: attribution is where the
+// client connected from, not which ephemeral port it used.
+func remoteHost(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
 }
 
 // TelemetryEvent tags a buffered event with a monotonic sequence so a remote
@@ -184,14 +215,16 @@ var (
 	telemetryBoot = strconv.FormatInt(time.Now().UnixNano(), 36)
 )
 
-func logTelemetry(t Telemetry) {
+func logTelemetry(t Telemetry, client string) {
 	metrics.observe(t)
 
-	// Constant, and set here rather than by callers so no call site can forget
-	// it. The gateway has no target field and does not gain one: its provenance
-	// is this process, and locality is the one shared dimension the three streams
-	// need.
+	// Both set here rather than by struct field at the call sites so no site can
+	// forget them — client arrives as an enforced argument, locality is constant
+	// for this process. The gateway has no target field and does not gain one:
+	// its provenance is this process, and locality is the one shared dimension
+	// the three streams need.
 	t.Locality = "local"
+	t.Client = client
 
 	telemetryMutex.Lock()
 	telemetrySeq++
@@ -525,6 +558,39 @@ func (p *OllamaProvider) Name() string {
 	return "ollama"
 }
 
+// thinkRequested decides whether the native Ollama request should ask the model
+// to emit its thinking channel. The gateway defaults to false: a thinking model
+// that fills only the think channel leaves OpenAI content empty while usage
+// still reports a full completion, which clients render as a blank reply (the
+// gemma4:12b failure). An explicit override wins: the top-level think field if
+// the client sent one, otherwise routing.provider_params["think"].
+func thinkRequested(req Request) bool {
+	if req.Think != nil {
+		return *req.Think
+	}
+	if v, ok := req.Routing.ProviderParams["think"].(bool); ok {
+		return v
+	}
+	return false
+}
+
+// ollamaContent picks the text an OpenAI client should see from a native Ollama
+// message. Content wins whenever it has any non-whitespace; only when content is
+// empty does the thinking channel stand in, so a model that filled only its
+// think channel still yields a non-empty reply instead of a blank one. Thinking
+// is never merged into a non-empty content: doing so would corrupt the answer.
+func ollamaContent(content, thinking, reasoning string) string {
+	if strings.TrimSpace(content) != "" {
+		return content
+	}
+	for _, candidate := range []string{thinking, reasoning} {
+		if strings.TrimSpace(candidate) != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
 func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, error) {
 	// Native /api/chat endpoint, not /v1/chat/completions: Ollama's OpenAI
 	// compat layer silently drops the "options" object, so num_ctx/kv_cache_type
@@ -543,6 +609,7 @@ func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, e
 		"messages": req.Messages,
 		"tools":    req.Tools,
 		"stream":   false,
+		"think":    thinkRequested(req),
 		"options": map[string]interface{}{
 			"num_ctx":       contextWindow(req.Model, req.Messages, maxTokens, req.Routing.ProviderParams),
 			"num_predict":   maxTokens,
@@ -581,6 +648,11 @@ func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, e
 		Message struct {
 			Role    string `json:"role"`
 			Content string `json:"content"`
+			// Thinking and Reasoning are the channels a thinking model may use
+			// instead of (or before) content. They are decoded so content can
+			// fall back to them when content itself is empty.
+			Thinking  string `json:"thinking"`
+			Reasoning string `json:"reasoning"`
 			// Ollama's arguments are an object; OpenAI's are a string. Decoding
 			// as RawMessage and re-encoding below performs that translation
 			// without guessing at the inner shape.
@@ -626,8 +698,12 @@ func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, e
 		Created: time.Now().Unix(),
 		Model:   native.Model,
 		Choices: []Choice{{
-			Index:        0,
-			Message:      Message{Role: native.Message.Role, Content: native.Message.Content, ToolCalls: toolCalls},
+			Index: 0,
+			Message: Message{
+				Role:      native.Message.Role,
+				Content:   ollamaContent(native.Message.Content, native.Message.Thinking, native.Message.Reasoning),
+				ToolCalls: toolCalls,
+			},
 			FinishReason: finish,
 		}},
 		Usage: Usage{
@@ -655,6 +731,7 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 		"messages": req.Messages,
 		"tools":    req.Tools,
 		"stream":   true,
+		"think":    thinkRequested(req),
 		"options": map[string]interface{}{
 			"num_ctx":       contextWindow(req.Model, req.Messages, maxTokens, req.Routing.ProviderParams),
 			"num_predict":   maxTokens,
@@ -700,7 +777,7 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 	created := time.Now().Unix()
 	model := req.Model
 	promptTokens, completionTokens := 0, 0
-	var content strings.Builder
+	var content, thinking, reasoning strings.Builder
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
@@ -712,7 +789,9 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 		var ev struct {
 			Model   string `json:"model"`
 			Message struct {
-				Content string `json:"content"`
+				Content   string `json:"content"`
+				Thinking  string `json:"thinking"`
+				Reasoning string `json:"reasoning"`
 			} `json:"message"`
 			PromptEvalCount int  `json:"prompt_eval_count"`
 			EvalCount       int  `json:"eval_count"`
@@ -723,6 +802,12 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 		}
 		if ev.Model != "" {
 			model = ev.Model
+		}
+		if ev.Message.Thinking != "" {
+			thinking.WriteString(ev.Message.Thinking)
+		}
+		if ev.Message.Reasoning != "" {
+			reasoning.WriteString(ev.Message.Reasoning)
 		}
 		if ev.Done {
 			// Token counts only arrive with the terminal event in streaming mode.
@@ -742,6 +827,21 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 		return nil, true, err
 	}
 
+	// A thinking-only model leaves the content builder empty even though Ollama
+	// streamed a full think channel. Emit the aggregated thinking as content only
+	// now, at the end, so a model that also streamed real content never has its
+	// thinking interleaved into the reply.
+	assembled := content.String()
+	if strings.TrimSpace(assembled) == "" {
+		if fallback := ollamaContent("", thinking.String(), reasoning.String()); fallback != "" {
+			writeSSEChunk(w, id, created, model, fallback, "")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			assembled = fallback
+		}
+	}
+
 	// Terminate the stream cleanly even if Ollama's done event never arrived, so a
 	// streaming client always sees a finish_reason and [DONE] rather than a hang.
 	writeSSEChunk(w, id, created, model, "", "stop")
@@ -757,7 +857,7 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 		Model:   model,
 		Choices: []Choice{{
 			Index:        0,
-			Message:      Message{Role: "assistant", Content: content.String()},
+			Message:      Message{Role: "assistant", Content: assembled},
 			FinishReason: "stop",
 		}},
 		Usage: Usage{
@@ -957,17 +1057,18 @@ var (
 // logQueuedCancel records a request whose client went away while it waited for
 // the inference slot. Nothing was sent to Ollama, so there is no status left to
 // report, but the gap would otherwise be invisible in the telemetry stream.
-func logQueuedCancel(req Request, ctxWindow int, t0 time.Time) {
+func logQueuedCancel(req Request, ctxWindow int, t0 time.Time, client string) {
 	logTelemetry(Telemetry{
 		RequestID:     req.Routing.RequestID,
 		Model:         req.Model,
 		ContextWindow: ctxWindow,
 		Elapsed:       time.Since(t0).Seconds(),
 		Error:         "client_cancelled_while_queued",
-	})
+	}, client)
 }
 
 func handleInference(w http.ResponseWriter, r *http.Request) {
+	caller := callerID(r)
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -995,7 +1096,7 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 			ContextWindow: ctxWindow,
 			Elapsed:       time.Since(t0).Seconds(),
 			Error:         "memory_pressure",
-		})
+		}, caller)
 		http.Error(w, "Local memory pressure: available RAM below safety margin", http.StatusTooManyRequests)
 		return
 	}
@@ -1024,12 +1125,12 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 		if sp, ok := provider.(StreamingProvider); ok {
 			granted, err := acquireSlot(r.Context(), priorityFor(req.Routing.LatencyClass))
 			if err == errQueueFull {
-				logTelemetry(Telemetry{RequestID: req.Routing.RequestID, Model: req.Model, ContextWindow: ctxWindow, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"})
+				logTelemetry(Telemetry{RequestID: req.Routing.RequestID, Model: req.Model, ContextWindow: ctxWindow, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"}, caller)
 				http.Error(w, "Inference queue full; retry later", http.StatusTooManyRequests)
 				return
 			}
 			if !granted {
-				logQueuedCancel(req, ctxWindow, t0)
+				logQueuedCancel(req, ctxWindow, t0, caller)
 				return
 			}
 			res, committed, err := sp.ExecuteStream(r.Context(), upstreamReq, w)
@@ -1043,7 +1144,7 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 			}
 			if err != nil {
 				te.Error = err.Error()
-				logTelemetry(te)
+				logTelemetry(te, caller)
 				// Only a failure before the first byte can still become a status code.
 				if !committed {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1052,19 +1153,19 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 			}
 			te.PromptTokens = res.Usage.PromptTokens
 			te.CompletionTokens = res.Usage.CompletionTokens
-			logTelemetry(te)
+			logTelemetry(te, caller)
 			return
 		}
 	}
 
 	granted, err := acquireSlot(r.Context(), priorityFor(req.Routing.LatencyClass))
 	if err == errQueueFull {
-		logTelemetry(Telemetry{RequestID: req.Routing.RequestID, Model: req.Model, ContextWindow: ctxWindow, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"})
+		logTelemetry(Telemetry{RequestID: req.Routing.RequestID, Model: req.Model, ContextWindow: ctxWindow, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"}, caller)
 		http.Error(w, "Inference queue full; retry later", http.StatusTooManyRequests)
 		return
 	}
 	if !granted {
-		logQueuedCancel(req, ctxWindow, t0)
+		logQueuedCancel(req, ctxWindow, t0, caller)
 		return
 	}
 	res, err := provider.Execute(r.Context(), upstreamReq)
@@ -1077,7 +1178,7 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 			ContextWindow: ctxWindow,
 			Elapsed:       time.Since(t0).Seconds(),
 			Error:         err.Error(),
-		})
+		}, caller)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1089,7 +1190,7 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 		Elapsed:          time.Since(t0).Seconds(),
 		PromptTokens:     res.Usage.PromptTokens,
 		CompletionTokens: res.Usage.CompletionTokens,
-	})
+	}, caller)
 
 	// Set this explicitly: without it Go sniffs the JSON body as text/plain, which
 	// strict OpenAI clients reject.
@@ -1113,10 +1214,11 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 func handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	t0 := time.Now()
 	requestID := r.Header.Get("X-Request-Id")
+	caller := callerID(r)
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()}, caller)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1127,7 +1229,7 @@ func handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 			RequestID: requestID,
 			Elapsed:   time.Since(t0).Seconds(),
 			Error:     "memory_pressure",
-		})
+		}, caller)
 		http.Error(w, "Local memory pressure: available RAM below safety margin", http.StatusTooManyRequests)
 		return
 	}
@@ -1137,7 +1239,7 @@ func handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	// swap pressure this project has already paid for once.
 	granted, err := acquireSlot(r.Context(), headerPriority(r))
 	if err == errQueueFull {
-		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"})
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"}, caller)
 		http.Error(w, "Inference queue full; retry later", http.StatusTooManyRequests)
 		return
 	}
@@ -1146,7 +1248,7 @@ func handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 			RequestID: requestID,
 			Elapsed:   time.Since(t0).Seconds(),
 			Error:     "client_cancelled_while_queued",
-		})
+		}, caller)
 		return
 	}
 	defer inferenceSlots.release()
@@ -1154,7 +1256,7 @@ func handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	upstream, err := http.NewRequestWithContext(r.Context(), "POST",
 		ollamaURL+"/v1/embeddings", bytes.NewReader(bodyBytes))
 	if err != nil {
-		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()}, caller)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1163,7 +1265,7 @@ func handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Timeout: ollamaTimeout()}
 	resp, err := client.Do(upstream)
 	if err != nil {
-		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()}, caller)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -1184,7 +1286,7 @@ func handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	if _, copyErr := io.Copy(w, resp.Body); copyErr != nil && te.Error == "" {
 		te.Error = copyErr.Error()
 	}
-	logTelemetry(te)
+	logTelemetry(te, caller)
 }
 
 // defaultImageModel is the Lattice alias for the diffusion model. An image
@@ -1220,17 +1322,18 @@ func handleImageEdits(w http.ResponseWriter, r *http.Request) {
 func handleImage(w http.ResponseWriter, r *http.Request, op string) {
 	t0 := time.Now()
 	requestID := r.Header.Get("X-Request-Id")
+	caller := callerID(r)
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()}, caller)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	var img ImageRequest
 	if err := json.Unmarshal(bodyBytes, &img); err != nil {
-		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()}, caller)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1245,14 +1348,14 @@ func handleImage(w http.ResponseWriter, r *http.Request, op string) {
 			Model:     img.Model,
 			Elapsed:   time.Since(t0).Seconds(),
 			Error:     "memory_pressure",
-		})
+		}, caller)
 		http.Error(w, "Local memory pressure: available RAM below image margin", http.StatusTooManyRequests)
 		return
 	}
 
 	granted, err := acquireSlot(r.Context(), headerPriority(r))
 	if err == errQueueFull {
-		logTelemetry(Telemetry{RequestID: requestID, Model: img.Model, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"})
+		logTelemetry(Telemetry{RequestID: requestID, Model: img.Model, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"}, caller)
 		http.Error(w, "Inference queue full; retry later", http.StatusTooManyRequests)
 		return
 	}
@@ -1262,7 +1365,7 @@ func handleImage(w http.ResponseWriter, r *http.Request, op string) {
 			Model:     img.Model,
 			Elapsed:   time.Since(t0).Seconds(),
 			Error:     "client_cancelled_while_queued",
-		})
+		}, caller)
 		return
 	}
 	defer inferenceSlots.release()
@@ -1272,14 +1375,14 @@ func handleImage(w http.ResponseWriter, r *http.Request, op string) {
 	provider := providers[providerName]
 	providerMutex.RUnlock()
 	if provider == nil {
-		logTelemetry(Telemetry{RequestID: requestID, Model: img.Model, Elapsed: time.Since(t0).Seconds(), Error: "no provider registered for model"})
+		logTelemetry(Telemetry{RequestID: requestID, Model: img.Model, Elapsed: time.Since(t0).Seconds(), Error: "no provider registered for model"}, caller)
 		http.Error(w, "No provider registered for model", http.StatusInternalServerError)
 		return
 	}
 
 	ip, ok := provider.(ImageProvider)
 	if !ok {
-		logTelemetry(Telemetry{RequestID: requestID, Model: img.Model, Elapsed: time.Since(t0).Seconds(), Error: fmt.Sprintf("provider %q is not an image provider", providerName)})
+		logTelemetry(Telemetry{RequestID: requestID, Model: img.Model, Elapsed: time.Since(t0).Seconds(), Error: fmt.Sprintf("provider %q is not an image provider", providerName)}, caller)
 		http.Error(w, "Provider is not an image provider", http.StatusInternalServerError)
 		return
 	}
@@ -1294,11 +1397,11 @@ func handleImage(w http.ResponseWriter, r *http.Request, op string) {
 	te := Telemetry{RequestID: requestID, Model: img.Model, Elapsed: time.Since(t0).Seconds()}
 	if err != nil {
 		te.Error = err.Error()
-		logTelemetry(te)
+		logTelemetry(te, caller)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	logTelemetry(te)
+	logTelemetry(te, caller)
 
 	// Set this explicitly: without it Go sniffs the JSON body as text/plain,
 	// which strict OpenAI clients reject.
@@ -1330,29 +1433,30 @@ func handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 func handleSpeech(w http.ResponseWriter, r *http.Request, op string) {
 	t0 := time.Now()
 	requestID := r.Header.Get("X-Request-Id")
+	caller := callerID(r)
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()}, caller)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if !budgeter.CanAccommodate() {
 		fmt.Println("  Memory pressure: available RAM below safety margin. Rejecting speech request.")
-		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: "memory_pressure"})
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: "memory_pressure"}, caller)
 		http.Error(w, "Local memory pressure: available RAM below safety margin", http.StatusTooManyRequests)
 		return
 	}
 
 	granted, err := acquireSlot(r.Context(), headerPriority(r))
 	if err == errQueueFull {
-		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"})
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: "queue_full"}, caller)
 		http.Error(w, "Inference queue full; retry later", http.StatusTooManyRequests)
 		return
 	}
 	if !granted {
-		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: "client_cancelled_while_queued"})
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: "client_cancelled_while_queued"}, caller)
 		return
 	}
 	defer inferenceSlots.release()
@@ -1363,7 +1467,7 @@ func handleSpeech(w http.ResponseWriter, r *http.Request, op string) {
 	if op == "synthesize" {
 		var req SynthesisRequest
 		if err := json.Unmarshal(bodyBytes, &req); err != nil {
-			logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+			logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()}, caller)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -1372,7 +1476,7 @@ func handleSpeech(w http.ResponseWriter, r *http.Request, op string) {
 		}
 		sp, providerName, ok := speechCapability(req.Model)
 		if !ok {
-			logTelemetry(Telemetry{RequestID: requestID, Model: req.Model, Elapsed: time.Since(t0).Seconds(), Error: fmt.Sprintf("provider %q is not a speech provider", providerName)})
+			logTelemetry(Telemetry{RequestID: requestID, Model: req.Model, Elapsed: time.Since(t0).Seconds(), Error: fmt.Sprintf("provider %q is not a speech provider", providerName)}, caller)
 			http.Error(w, "Provider is not a speech provider", http.StatusInternalServerError)
 			return
 		}
@@ -1380,11 +1484,11 @@ func handleSpeech(w http.ResponseWriter, r *http.Request, op string) {
 		te := Telemetry{RequestID: requestID, Model: req.Model, Elapsed: time.Since(t0).Seconds()}
 		if err != nil {
 			te.Error = err.Error()
-			logTelemetry(te)
+			logTelemetry(te, caller)
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		logTelemetry(te)
+		logTelemetry(te, caller)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(res)
 		return
@@ -1392,7 +1496,7 @@ func handleSpeech(w http.ResponseWriter, r *http.Request, op string) {
 
 	var req TranscriptionRequest
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
-		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()})
+		logTelemetry(Telemetry{RequestID: requestID, Elapsed: time.Since(t0).Seconds(), Error: err.Error()}, caller)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1401,7 +1505,7 @@ func handleSpeech(w http.ResponseWriter, r *http.Request, op string) {
 	}
 	sp, providerName, ok := speechCapability(req.Model)
 	if !ok {
-		logTelemetry(Telemetry{RequestID: requestID, Model: req.Model, Elapsed: time.Since(t0).Seconds(), Error: fmt.Sprintf("provider %q is not a speech provider", providerName)})
+		logTelemetry(Telemetry{RequestID: requestID, Model: req.Model, Elapsed: time.Since(t0).Seconds(), Error: fmt.Sprintf("provider %q is not a speech provider", providerName)}, caller)
 		http.Error(w, "Provider is not a speech provider", http.StatusInternalServerError)
 		return
 	}
@@ -1409,11 +1513,11 @@ func handleSpeech(w http.ResponseWriter, r *http.Request, op string) {
 	te := Telemetry{RequestID: requestID, Model: req.Model, Elapsed: time.Since(t0).Seconds()}
 	if err != nil {
 		te.Error = err.Error()
-		logTelemetry(te)
+		logTelemetry(te, caller)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	logTelemetry(te)
+	logTelemetry(te, caller)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
 }
@@ -1532,7 +1636,49 @@ func main() {
 	providers = provs
 	providerMutex.Unlock()
 
-	addr := latticeconfig.Env("LATTICE_GATEWAY_ADDR", ":8081")
-	fmt.Printf("Lattice Gateway listening on %s (Dynamic Memory Budgeting active)\n", addr)
-	log.Fatal(http.ListenAndServe(addr, newRouter()))
+	for _, a := range gatewayBindAddrs() {
+		go serveOn(a)
+	}
+	// Every serveOn blocks for the process's lifetime; failure inside one is
+	// fatal to the process, so main has nothing better to do than wait.
+	select {}
+}
+
+// gatewayBindAddrs resolves the listeners to open. LATTICE_GATEWAY_BIND lists
+// explicit "ip:port" pairs — a gateway normally serves 127.0.0.1 for its own
+// host plus its tailnet address, which is what the control plane polls. Without
+// it the legacy LATTICE_GATEWAY_ADDR semantics apply unchanged, including the
+// wildcard default. The gateway is unauthenticated; who can reach the port is
+// therefore a bind decision, not application logic.
+func gatewayBindAddrs() []string {
+	if b := latticeconfig.Env("LATTICE_GATEWAY_BIND", ""); b != "" {
+		var out []string
+		for _, e := range strings.Split(b, ",") {
+			if e = strings.TrimSpace(e); e != "" {
+				out = append(out, e)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return []string{latticeconfig.Env("LATTICE_GATEWAY_ADDR", ":8081")}
+}
+
+// serveOn opens one listener and serves it for the process's lifetime. A
+// machine booting can reach here before Tailscale has raised the tailnet
+// interface, so an address that is not up yet is retried — dying on the first
+// attempt would leave launchd restarting the whole gateway (and losing the
+// telemetry ring) over a race the interface resolves by itself within seconds.
+// The other listeners are unaffected either way.
+func serveOn(addr string) {
+	for {
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			fmt.Printf("Lattice Gateway listening on %s (Dynamic Memory Budgeting active)\n", addr)
+			log.Fatal(http.Serve(ln, newRouter()))
+		}
+		fmt.Printf("Lattice Gateway waiting for %s: %v (retry in 5s)\n", addr, err)
+		time.Sleep(5 * time.Second)
+	}
 }

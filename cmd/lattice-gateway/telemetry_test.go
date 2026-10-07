@@ -15,7 +15,7 @@ func TestLogTelemetryStampsLocalLocality(t *testing.T) {
 	path := t.TempDir() + "/telemetry-gateway.jsonl"
 	t.Setenv("LATTICE_GATEWAY_TELEMETRY", path)
 
-	logTelemetry(Telemetry{RequestID: "req-1", Model: "granite4:3b"})
+	logTelemetry(Telemetry{RequestID: "req-1", Model: "granite4:3b"}, "caller-set-in-test")
 
 	raw, err := os.ReadFile(path)
 	if err != nil {

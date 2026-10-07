@@ -58,7 +58,35 @@ if [[ -n "$busy" ]]; then
 fi
 
 mkdir -p "$LOG_DIR" "$(dirname "$DEST")"
+
+# The gateway is unauthenticated, so what it binds decides who can reach it:
+# loopback for this host's own workloads, the tailnet address for the control
+# plane — never a wildcard. The tailnet address is detected from the Tailscale
+# CLI (standalone install or the GUI app bundle), falling back to a 100.x
+# interface address; an operator can always override with GATEWAY_BIND.
+GATEWAY_BIND="${GATEWAY_BIND:-}"
+if [[ -z "$GATEWAY_BIND" ]]; then
+  TS="$(command -v tailscale || true)"
+  if [[ -z "$TS" && -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]]; then
+    TS="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+  fi
+  TS_IP=""
+  [[ -n "$TS" ]] && TS_IP="$("$TS" ip -4 2>/dev/null || true)"
+  if [[ -z "$TS_IP" ]] && command -v ifconfig >/dev/null 2>&1; then
+    TS_IP="$(ifconfig 2>/dev/null | awk '$1 == "inet" && $2 ~ /^100\./ {print $2; exit}')"
+  fi
+  if [[ -n "$TS_IP" ]]; then
+    GATEWAY_BIND="127.0.0.1:8081,$TS_IP:8081"
+  else
+    echo "error: could not detect this Mac's tailnet address." >&2
+    echo "a wildcard bind would leave the gateway open; set one explicitly:" >&2
+    echo "  GATEWAY_BIND=127.0.0.1:8081,<tailnet-ip>:8081 ./deploy/install-macos.sh" >&2
+    exit 1
+  fi
+fi
+
 sed -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
+  -e "s|__GATEWAY_BIND__|$GATEWAY_BIND|g" \
   "$TEMPLATE" >"$DEST"
 
 launchctl bootstrap "$DOMAIN" "$DEST"
