@@ -1,14 +1,11 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"math"
-	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -52,11 +49,7 @@ type Telemetry struct {
 	LatencyClass string  `json:"latency_class"`
 	Locality     string  `json:"locality"`
 	RequiredCap  string  `json:"required_cap,omitempty"`
-	// Who asked. The frontend forwards its own caller here as X-Lattice-Client;
-	// an un-headered peer (an older frontend mixed into a rollout) shows as the
-	// address control actually received the decision request from.
-	Client string `json:"client,omitempty"`
-	Error  string `json:"error,omitempty"`
+	Error        string  `json:"error,omitempty"`
 }
 
 type Gateway struct {
@@ -303,35 +296,42 @@ func monitorHealth() {
 			healthMutex.Lock()
 			gatewayHealthy[id] = healthy
 			healthMutex.Unlock()
-			pullGatewayTelemetry(id, gw)
+			pullGatewayTelemetry(gw)
 		}
 		time.Sleep(10 * time.Second)
 	}
 }
 
-// gatewayRelay is where the relay has read to for one gateway: the seq of the
-// last event appended locally, and the identity of the gateway process that
-// issued it. known records whether they mean anything yet — see planRelay.
+// A relay cursor is the position this process has delivered for ONE gateway:
+// the seq of the last event appended locally, and the identity of the gateway
+// process that issued it, since a seq alone cannot be trusted across a gateway
+// restart. known records whether the pair means anything yet — see planRelay.
 //
-// The cursor is per-gateway, not global: each gateway's counter and boot id are
-// its own, so a shared state would have every alternating poll flip the boot id
-// and re-relay both rings in full. Each cursor is recovered from the relay file
-// at startup, where relayed rows carry the gateway that produced them.
-type gatewayRelay struct {
+// The cursor is keyed by gateway id because every local gateway has its own
+// boot id and its own seq counter. One global cursor made every poll of one
+// gateway look like a restart of the other (bootChanged), so each poll resynced
+// and re-appended the other gateway's whole ring, forever.
+type relayCursor struct {
 	seq   int64
 	boot  string
 	known bool
 }
 
 var (
-	gatewayRelayMu      sync.Mutex
-	gatewayRelayCursors = map[string]gatewayRelay{}
+	relayMu      sync.Mutex
+	relayCursors = map[string]relayCursor{}
+
+	// relayRecovered maps a boot id to the highest seq already relayed for it,
+	// read once from the tail of the relay file at startup. It is the durable
+	// record a restart resumes from, keyed by boot so interleaved gateways each
+	// resume at their own position.
+	relayRecovered = map[string]int64{}
 )
 
-func saveRelayCursor(gwID string, st gatewayRelay) {
-	gatewayRelayMu.Lock()
-	gatewayRelayCursors[gwID] = st
-	gatewayRelayMu.Unlock()
+func relayCursorFor(id string) relayCursor {
+	relayMu.Lock()
+	defer relayMu.Unlock()
+	return relayCursors[id]
 }
 
 func gatewayRelayPath() string {
@@ -440,37 +440,102 @@ func fetchGatewayTelemetry(endpoint string, since int64) (*gatewayTelemetryPaylo
 	return &payload, nil
 }
 
-// recoverRelayCursors reads where the relay has already delivered each gateway,
-// so a control-plane restart resumes where it left off rather than seeding past
-// the events that arrived while it was down. The relay file is the durable
-// record of what has been delivered, so this needs no separate state; rows are
-// attributed by the gateway field stamped with each relayed event. Rows without
-// that field predate attribution (or are torn) and cannot be trusted to any
-// gateway, so they are skipped — those gateways seed, at most once.
-func recoverRelayCursors(path string) map[string]gatewayRelay {
-	out := map[string]gatewayRelay{}
+// recoverRelayState reads the seq and boot id of the last event already
+// relayed, so a control-plane restart resumes where it left off rather than
+// seeding past the events that arrived while it was down. The relay file is
+// already the durable record of what has been delivered, so this needs no new
+// state. A zero seq means nothing is known, which the caller treats as a fresh
+// start.
+func recoverRelayState(path string) (seq int64, boot string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, ""
+	}
+	defer f.Close()
+
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return 0, ""
+	}
+	const tailBytes = 8192
+	if off := st.Size() - tailBytes; off > 0 {
+		// Landing mid-row only spoils the first line, which we never want.
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
+			return 0, ""
+		}
+	}
+	buf, err := io.ReadAll(f)
+	if err != nil {
+		return 0, ""
+	}
+
+	lines := strings.Split(string(buf), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var row struct {
+			Seq  int64  `json:"seq"`
+			Boot string `json:"boot"`
+		}
+		if err := json.Unmarshal([]byte(line), &row); err == nil && row.Seq > 0 {
+			return row.Seq, row.Boot
+		}
+	}
+	return 0, ""
+}
+
+// recoverRelayCursors scans the tail of the relay file and returns the highest
+// seq already relayed for each gateway boot id it can still see. The relay file
+// is the durable record of what reached the Bee screen, so a restart can resume
+// every gateway at its own position — interleaved boot ids included — without
+// replaying a single line. A boot id absent from the tail is unknown, and the
+// gateway's first poll seeds instead (delivering nothing), exactly like a fresh
+// relay file.
+//
+// The tail window is 256 KiB rather than the old 8 KiB: with two gateways
+// appending on top of each other, 8 KiB may not hold even one event per boot,
+// and a boot that falls out of the window is re-seeded rather than resumed.
+func recoverRelayCursors(path string) map[string]int64 {
+	out := map[string]int64{}
 	f, err := os.Open(path)
 	if err != nil {
 		return out
 	}
 	defer f.Close()
 
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return out
+	}
+	const tailBytes = 256 * 1024
+	if off := st.Size() - tailBytes; off > 0 {
+		// Landing mid-row only spoils the first line, which we never want.
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
+			return out
+		}
+	}
+	buf, err := io.ReadAll(f)
+	if err != nil {
+		return out
+	}
+
+	for _, line := range strings.Split(string(buf), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
 		var row struct {
-			Seq     int64  `json:"seq"`
-			Boot    string `json:"boot"`
-			Gateway string `json:"gateway"`
+			Seq  int64  `json:"seq"`
+			Boot string `json:"boot"`
 		}
-		if err := json.Unmarshal(line, &row); err != nil || row.Seq <= 0 || row.Gateway == "" {
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
 			continue
 		}
-		out[row.Gateway] = gatewayRelay{seq: row.Seq, boot: row.Boot, known: true}
+		if row.Seq > 0 && row.Boot != "" && row.Seq > out[row.Boot] {
+			out[row.Boot] = row.Seq
+		}
 	}
 	return out
 }
@@ -490,15 +555,18 @@ func appendRelay(path string, line []byte) error {
 // Bee display instead of only a log nobody reads. It deliberately carries
 // elapsed_s — the key the feeder branches on for gateway events — plus error,
 // which is how the feeder already renders a failure distinctly. The seq is the
-// real cursor, so a later restart still recovers from the file's last line.
-func gapMarker(gwID string, seq int64, note string, lost int64) []byte {
+// real cursor, so a later restart still recovers from the file's last line; the
+// boot and gateway fields let per-gateway recovery attribute the marker to the
+// stream that lost events rather than confounding the two boot ids.
+func gapMarker(seq int64, gatewayID, boot, note string, lost int64) []byte {
 	msg := fmt.Sprintf("%s (count unknown)", note)
 	if lost >= 0 {
 		msg = fmt.Sprintf("%s (%d lost)", note, lost)
 	}
 	b, _ := json.Marshal(map[string]interface{}{
-		"gateway":    gwID,
 		"seq":        seq,
+		"boot":       boot,
+		"gateway":    gatewayID,
 		"request_id": "telemetry-gap",
 		"model":      "relay",
 		"elapsed_s":  0,
@@ -507,28 +575,72 @@ func gapMarker(gwID string, seq int64, note string, lost int64) []byte {
 	return b
 }
 
+// tagGateway stamps the originating gateway id onto one relayed event so a
+// reader — and the feeder's dedupe key — can tell two gateways' streams apart
+// even when their boot ids collide. Every original field is preserved; a
+// non-object payload is relayed verbatim rather than dropped.
+func tagGateway(raw json.RawMessage, gatewayID string) []byte {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return raw
+	}
+	if _, exists := obj["gateway"]; !exists {
+		obj["gateway"] = gatewayID
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return raw
+	}
+	return b
+}
+
 // Relaying the gateway's runtime telemetry: the gateway lives on the Mac with
 // no shared filesystem, so we pull its buffered events over HTTP and append
 // them to a local JSONL — the same stream the Bee feeder tails for the
 // control/frontend events. The control plane is a transport here, not a
 // formatter: it never emits to the Bee socket itself.
-func pullGatewayTelemetry(gwID string, gw Gateway) {
-	gatewayRelayMu.Lock()
-	st := gatewayRelayCursors[gwID]
-	gatewayRelayMu.Unlock()
+func pullGatewayTelemetry(gw Gateway) {
+	// One pull at a time: the cursor read, the fetch, and the append are one
+	// decision, and two pollers racing the same gateway would each append the
+	// same event. monitorHealth is already sequential; the lock makes that
+	// guarantee a property of this function rather than of its caller.
+	relayMu.Lock()
+	defer relayMu.Unlock()
 
-	payload, err := fetchGatewayTelemetry(gw.Endpoint, st.seq)
+	cur, known := relayCursors[gw.ID]
+	payload, err := fetchGatewayTelemetry(gw.Endpoint, cur.seq)
 	if err != nil {
 		return
 	}
 
+	if !known {
+		// First poll of this gateway in this process. If the relay file still
+		// holds the exact boot id we are talking to, resume at the seq already
+		// delivered for it; otherwise seed past the buffered ring (deliver
+		// nothing) exactly like a fresh relay file, so events already on the
+		// Bee screen are not replayed.
+		if seq, ok := relayRecovered[payload.Boot]; ok && payload.Boot != "" && seq > 0 {
+			cur = relayCursor{seq: seq, boot: payload.Boot, known: true}
+			// The first fetch used since 0; its event list reaches further back
+			// than the recovered cursor, so re-fetch from there before
+			// appending anything.
+			refetched, rerr := fetchGatewayTelemetry(gw.Endpoint, seq)
+			if rerr != nil {
+				return
+			}
+			payload = refetched
+		} else {
+			cur = relayCursor{}
+		}
+	}
+
 	// A boot id we have never seen only counts as a change once we have one to
 	// compare against: on the first poll there is nothing to contradict.
-	bootChanged := st.boot != "" && payload.Boot != "" && payload.Boot != st.boot
+	bootChanged := cur.boot != "" && payload.Boot != "" && payload.Boot != cur.boot
 
-	action := planRelay(st.known, st.seq, payload.Seq, payload.OldestSeq, bootChanged)
+	action := planRelay(cur.known, cur.seq, payload.Seq, payload.OldestSeq, bootChanged)
 	if action.Seed {
-		saveRelayCursor(gwID, gatewayRelay{seq: action.Next, boot: payload.Boot, known: true})
+		relayCursors[gw.ID] = relayCursor{seq: action.Next, boot: payload.Boot, known: true}
 		return
 	}
 
@@ -545,49 +657,22 @@ func pullGatewayTelemetry(gwID string, gw Gateway) {
 
 	path := gatewayRelayPath()
 	for _, ev := range payload.Events {
-		if err := appendRelay(path, stampRelayEvent(gwID, ev)); err != nil {
+		if err := appendRelay(path, tagGateway(ev, gw.ID)); err != nil {
 			fmt.Printf("Gateway telemetry relay error: %v\n", err)
 			return
 		}
 	}
 
 	// Written after the surviving events, so it reads chronologically and the
-	// file's final line for this gateway still carries the cursor a later
-	// restart recovers from.
+	// file's final line still carries the cursor a later restart recovers from.
 	if action.GapNote != "" {
-		fmt.Printf("Gateway telemetry gap: %s\n", action.GapNote)
-		if err := appendRelay(path, gapMarker(gwID, action.Next, action.GapNote, action.Lost)); err != nil {
+		fmt.Printf("Gateway telemetry gap [%s]: %s\n", gw.ID, action.GapNote)
+		if err := appendRelay(path, gapMarker(action.Next, gw.ID, payload.Boot, action.GapNote, action.Lost)); err != nil {
 			fmt.Printf("Gateway telemetry relay error: %v\n", err)
 		}
 	}
 
-	saveRelayCursor(gwID, gatewayRelay{seq: action.Next, boot: payload.Boot, known: true})
-}
-
-// stampRelayEvent tags an event with the gateway that produced it before it is
-// appended, so the relay file can attribute its rows for restart recovery —
-// two gateways restart their counters independently, and an unattributed seq
-// cannot be trusted to either. Events that fail to parse are relayed unmodified
-// rather than dropped; an already-stamped event (a forward-compatible gateway)
-// passes through untouched.
-func stampRelayEvent(gwID string, ev json.RawMessage) []byte {
-	var row map[string]json.RawMessage
-	if err := json.Unmarshal(ev, &row); err != nil {
-		return []byte(ev)
-	}
-	if _, exists := row["gateway"]; exists {
-		return []byte(ev)
-	}
-	idb, err := json.Marshal(gwID)
-	if err != nil {
-		return []byte(ev)
-	}
-	row["gateway"] = idb
-	out, err := json.Marshal(row)
-	if err != nil {
-		return []byte(ev)
-	}
-	return out
+	relayCursors[gw.ID] = relayCursor{seq: action.Next, boot: payload.Boot, known: true}
 }
 
 func dispatcher() {
@@ -767,23 +852,8 @@ func handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// remoteHost strips the port an address rides on; callerID prefers the value
-// the frontend forwarded about its own caller.
-func callerID(r *http.Request) string {
-	if c := r.Header.Get("X-Lattice-Client"); c != "" {
-		return c
-	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
-	}
-	return r.RemoteAddr
-}
-
 func handleRoute(w http.ResponseWriter, r *http.Request) {
 	t0 := time.Now()
-	// Who to attribute the decision to: the frontend's forwarded caller, else
-	// the peer that reached this route directly.
-	caller := callerID(r)
 
 	var req Request
 
@@ -791,7 +861,7 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 	// event the routing policy exists to produce, so a failure path that returned
 	// before this write would leave the policy unobservable at the moment it
 	// acted.
-	tele := Telemetry{Client: caller}
+	tele := Telemetry{}
 	defer func() {
 		tele.RequestID = req.Routing.RequestID
 		tele.DecisionTime = time.Since(t0).Seconds()
@@ -882,17 +952,15 @@ func handleRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// Resume the gateway relay where the last run left off. Without this the
-	// cursor starts at zero and the first pull seeds past everything buffered
-	// while this process was down — events that were never relayed to anyone.
-	gatewayRelayCursors = recoverRelayCursors(gatewayRelayPath())
-	if len(gatewayRelayCursors) > 0 {
-		names := make([]string, 0, len(gatewayRelayCursors))
-		for id, st := range gatewayRelayCursors {
-			names = append(names, fmt.Sprintf("%s@%d(%s)", id, st.seq, st.boot))
-		}
-		sort.Strings(names)
-		fmt.Printf("Gateway telemetry relay resuming: %s\n", strings.Join(names, ", "))
+	// Resume each gateway's relay where the last run left off. The recovered
+	// state is keyed by boot id, so every gateway resumes at its own seq;
+	// without this the cursor starts at zero and the first pull seeds past
+	// everything buffered while this process was down — events that were never
+	// relayed to anyone. A boot id the file no longer holds is seeded on that
+	// gateway's first poll instead.
+	relayRecovered = recoverRelayCursors(gatewayRelayPath())
+	if n := len(relayRecovered); n > 0 {
+		fmt.Printf("Gateway telemetry relay: recovered %d gateway boot(s) from %s\n", n, gatewayRelayPath())
 	}
 
 	go monitorHealth()
