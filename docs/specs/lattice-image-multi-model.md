@@ -151,7 +151,11 @@ Measured live 2026-10-07, all three models, from the Pi frontend
   no filter either. Its uncensored *convention-following* (vs Persephone's
   weights-level fine-tune) still needs a real-prompt A/B against
   `flux-uncensored` on both hosts before it can claim parity.
-- **Committed vs host-local registry.** The repo's `gateway-providers.json`
-  tracks the M1's registry; the M6's diverged host-local file already held
-  `flux-uncensored` before this work (precedent). Merging the two into
-  per-host files with a shared template is recorded as future cleanup.
+- **Committed vs host-local registry (resolved 2026-10-08).** The M6's
+  diverged `deploy/gateway-providers.json` was moved to runtime config
+  (`~/.config/lattice/gateway-providers.json`, plist `LATTICE_GATEWAY_PROVIDERS`
+  repointed) — the same home the control plane's env file uses — and its
+  deployment tree's `deploy/` files were restored to match committed main,
+  so future syncs are idempotent. The committed file tracks the M1's
+  registry; any host that diverges from it gets its own runtime-config file
+  rather than dirtying the checkout.
