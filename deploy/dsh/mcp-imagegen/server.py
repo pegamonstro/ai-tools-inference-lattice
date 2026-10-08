@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.request
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ImageContent
 
 FRONTEND = os.environ.get("LATTICE_FRONTEND_URL", "http://127.0.0.1:8080")
@@ -55,20 +57,43 @@ def _loras(loras: str) -> list[dict]:
     return out
 
 
+def _post(route: str, body: dict) -> dict:
+    """POST to one of the frontend's /v1/images routes. An HTTP failure raises
+    ToolError carrying the gateway's own error text, which is why the loras
+    name or the margin refusal that failed the request reaches the model —
+    a bare urllib exception would be wrapped as a content-less
+    "Error executing tool <name>" crash the caller cannot diagnose."""
+    req = urllib.request.Request(
+        f"{FRONTEND}/{route}",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode(errors="replace")
+        err = None
+        try:
+            err = json.loads(raw).get("error")
+        except ValueError:
+            pass
+        if isinstance(err, dict):
+            err = err.get("message") or json.dumps(err)
+        detail = err if isinstance(err, str) and err.strip() else raw.strip()
+        raise ToolError(f"{route} returned HTTP {exc.code}: {detail[-500:]}") from None
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        raise ToolError(f"lattice unreachable ({FRONTEND}): {exc}") from None
+
+
 def _generate(prompt: str, size: str | None, n: int, model: str, loras: list[dict]) -> list[ImageContent]:
     body = {"model": _model(model), "prompt": prompt, "n": n, "response_format": "b64_json"}
     if size:
         body["size"] = size
     if loras:
         body["loras"] = loras
-    req = urllib.request.Request(
-        f"{FRONTEND}/v1/images/generations",
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        payload = json.load(resp)
+    payload = _post("v1/images/generations", body)
     return [_image(item["b64_json"]) for item in payload["data"]]
 
 
@@ -78,14 +103,7 @@ def _edit(image_b64: str, prompt: str, size: str | None, n: int, model: str, lor
         body["size"] = size
     if loras:
         body["loras"] = loras
-    req = urllib.request.Request(
-        f"{FRONTEND}/v1/images/edits",
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        payload = json.load(resp)
+    payload = _post("v1/images/edits", body)
     return [_image(item["b64_json"]) for item in payload["data"]]
 
 
