@@ -388,3 +388,43 @@ line, `sysctl vm.swapusage` deltas).
   (`z-image-turbo`, `qwen-image-2.1`, `flux-uncensored`) returned valid images
   via the frontend → control → gateway → sidecar chain, control telemetry
   `target:"m6-gateway", locality:"local"`.
+
+## Ollama registry pinning — all resident chat + embedding models through the gateway (round 7)
+
+Goal: pin the six Ollama models in the gateway registry (`models` entries in the
+provider config) so each has a `lattice/gateway` reference and announced
+`max_context`, and sync the repo template (`deploy/gateway-providers.json`) to
+the live config — it had drifted (stale mlx provider, `qwen2.5-coder:3b`,
+`lfm2.5-2.6b` entries for hardware no longer in the fleet).
+
+- **New pin this round: `qwen3.8:27b`** with `context: 65536` — the repo's hybrid
+  Gated-DeltaNet attention keeps KV small like the lfm2.5 linear-attention case
+  (round 5), so the dense-model ceiling was not applied.
+- **Already pinned and carried over:** `gemma4:12b` → 262144, `gemma4:26b` →
+  131072, `gemma4:31b` → 65536 (round 5 measured no-swap ceilings),
+  `huihui_ai/dolphin3-abliterated:latest` (enhance model), and
+  `huihui_ai/qwen2.5-vl-abliterated:7b` + `bge-m3:latest` at the default ceiling.
+- **Benchmark** (same protocol as round 1/2: fixed two-sentence prompt,
+  `max_tokens 64`, single request, gateway OpenAI endpoint; native Ollama follow-up
+  call on the resident model for precise decode counters — `eval_count /
+  eval_duration`):
+
+| model | gateway wall | native decode | decode tok/s (round 7) | prior round |
+|---|---|---|---|---|
+| `bge-m3:latest` (embedding, 1024 dims) | 1.14 s | — | — | 0.031 s warm |
+| `huihui_ai/qwen2.5-vl-abliterated:7b` | 4.48 s | 38 tok / 1.12 s | 33.9 | 32.7 |
+| `gemma4:12b` | 7.05 s | 64 tok / 1.87 s | 34.2 | 32.8 |
+| `qwen3.8:27b` | 14.07 s | 64 tok / 3.73 s | 17.2 | 17.6 |
+| `gemma4:26b` | 7.70 s | 64 tok / 1.21 s | 52.9 | 58.5 |
+| `gemma4:31b` | 11.46 s | 64 tok / 4.28 s | 15.0 | 16.4 |
+
+- **All six entries answered with coherent text through the gateway OpenAI
+  endpoint** on the first attempt — no runner-wedge (empty-but-done) instance this
+  round; the fallback (`launchctl kickstart -k gui/$UID/com.ollama.ollama`) was not
+  needed.
+- **Decode speeds are within noise of the prior rounds** — registry pinning is
+  pure routing config and adds no serving cost; the gateway wall additionally
+  includes slot acquisition, and on a cold model, load time.
+- **Announcements** (`/v1/models`) reflect the pins: all six names listed with the
+  gateway default `max_context` 32768; the per-model `context` overrides remain
+  serving-side ceilings (round 5 mechanism, unchanged).
