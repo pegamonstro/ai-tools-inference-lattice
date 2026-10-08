@@ -1324,8 +1324,8 @@ An external agent platform is independently specifying a translation shim for La
 - [ ] **Step 1: Find what landed**
 
 ```bash
-ls -la /Users/archcore/Projects/golem/dsh-handoff/
-find /Users/archcore/Projects/golem -iname "*shim*" -o -iname "*lattice*" | head -20
+ls -la ~/Projects/golem/dsh-handoff/
+find ~/Projects/golem -iname "*shim*" -o -iname "*lattice*" | head -20
 ```
 
 - [ ] **Step 2: Diff its spec against ours**

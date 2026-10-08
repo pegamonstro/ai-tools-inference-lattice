@@ -312,16 +312,16 @@ gateways coexist without a name collision.
 ### Operational note — reboot auto-recovery (resolved)
 
 The M6's services are `gui/$UID` LaunchAgents, which only exist while a user is logged
-into the console. **Auto-login is configured** for `igor` (`autoLoginUser = igor`,
-FileVault off), so a reboot now boots straight into `igor`'s console session and
+into the console. **Auto-login is configured** for the service user (auto-login enabled,
+FileVault off), so a reboot now boots straight into the console session and
 Ollama, the gateway, the mflux sidecar, speech and Tailscale all auto-start. Verified
-across a reboot (2026-10-04): Tailscale reconnects (direct peer to rpi4), the gateway
-and Ollama return, and the control plane re-marks `m6-gateway` healthy with no manual
+across a reboot (2026-10-04): Tailscale reconnects (direct peer to the frontend host),
+the gateway and Ollama return, and the control plane re-marks the remote gateway healthy with no manual
 steps.
 
 Notes for the record:
 
-- `igor` is a full admin (group 80) with working sudo — the earlier "igor has no sudo"
+- the service user is a full admin (group 80) with working sudo — the earlier "no sudo"
   note was wrong. The LaunchDaemon path (`/Library/LaunchDaemons/`, root) remains
   available if auto-login is ever disabled.
 - Tailscale (standalone GUI app) is not a `gui` LaunchAgent; it runs via a login-item
