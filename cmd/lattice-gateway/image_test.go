@@ -275,3 +275,94 @@ func TestHandleImageForwardsLoras(t *testing.T) {
 		t.Errorf("loras = %+v, want [{lustly 0.8}]", loras)
 	}
 }
+
+// The sidecar's tuning knobs (steps, guidance, negative_prompt, seed, edit
+// strength) are Lattice extensions like loras: they ride the images body and
+// arrive in the sidecar's keys, and strength only travels with an edit.
+func TestHandleImageForwardsOptionalParams(t *testing.T) {
+	var sawPath string
+	var sawBody map[string]interface{}
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&sawBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"image":"aW1hZ2U=","seed":1,"width":512,"height":512,"seconds":1.0}`))
+	}))
+	defer sidecar.Close()
+
+	path := t.TempDir() + "/telemetry-gateway.jsonl"
+	t.Setenv("LATTICE_GATEWAY_TELEMETRY", path)
+	t.Setenv("LATTICE_GATEWAY_IMAGE_MARGIN_MB", "1")
+
+	oldBudgeter, oldProviders, oldRegistry := budgeter, providers, registry
+	budgeter = &MemoryBudgeter{safeMargin: 0, pageSize: 4096}
+	providers = map[string]Provider{"mflux": &MfluxProvider{Endpoint: sidecar.URL}}
+	registry = &providerRegistry{modelProviders: map[string]string{"flux-dev": "mflux"}}
+	defer func() { budgeter, providers, registry = oldBudgeter, oldProviders, oldRegistry }()
+
+	req := httptest.NewRequest("POST", "/v1/images/edits",
+		strings.NewReader(`{"model":"flux-dev","image":"aW1hZ2U=","prompt":"a cat","size":"512x512","n":1,"steps":4,"guidance":9,"seed":42,"negative_prompt":"blurry","strength":0.25}`))
+	req.Header.Set("X-Request-Id", "req-img-optional")
+	rec := httptest.NewRecorder()
+	handleImageEdits(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if sawPath != "/edit" {
+		t.Errorf("forwarded to %q, want /edit", sawPath)
+	}
+	if sawBody["steps"] != float64(4) {
+		t.Errorf("steps = %v, want 4", sawBody["steps"])
+	}
+	if sawBody["guidance"] != float64(9) {
+		t.Errorf("guidance = %v, want 9", sawBody["guidance"])
+	}
+	if sawBody["seed"] != float64(42) {
+		t.Errorf("seed = %v, want 42", sawBody["seed"])
+	}
+	if sawBody["negative_prompt"] != "blurry" {
+		t.Errorf("negative_prompt = %v, want blurry", sawBody["negative_prompt"])
+	}
+	if sawBody["strength"] != float64(0.25) {
+		t.Errorf("strength = %v, want 0.25", sawBody["strength"])
+	}
+}
+
+// Absent optional params must stay absent — omitempty on a pointer means the
+// sidecar's own defaults (random seed, edit strength 0.4) hold, same no-op
+// contract as the upstream mapping's.
+func TestHandleImageDoesNotForwardAbsentOptionalParams(t *testing.T) {
+	var sawBody map[string]interface{}
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&sawBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"image":"aW1hZ2U=","seed":1,"width":512,"height":512,"seconds":1.0}`))
+	}))
+	defer sidecar.Close()
+
+	path := t.TempDir() + "/telemetry-gateway.jsonl"
+	t.Setenv("LATTICE_GATEWAY_TELEMETRY", path)
+	t.Setenv("LATTICE_GATEWAY_IMAGE_MARGIN_MB", "1")
+
+	oldBudgeter, oldProviders, oldRegistry := budgeter, providers, registry
+	budgeter = &MemoryBudgeter{safeMargin: 0, pageSize: 4096}
+	providers = map[string]Provider{"mflux": &MfluxProvider{Endpoint: sidecar.URL}}
+	registry = &providerRegistry{modelProviders: map[string]string{"flux-dev": "mflux"}}
+	defer func() { budgeter, providers, registry = oldBudgeter, oldProviders, oldRegistry }()
+
+	req := httptest.NewRequest("POST", "/v1/images/generations",
+		strings.NewReader(`{"model":"flux-dev","prompt":"a cat","size":"512x512","n":1}`))
+	req.Header.Set("X-Request-Id", "req-img-nooptional")
+	rec := httptest.NewRecorder()
+	handleImageGenerations(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	for _, key := range []string{"steps", "guidance", "seed", "negative_prompt", "strength", "model", "loras"} {
+		if _, ok := sawBody[key]; ok {
+			t.Errorf("%s forwarded when the client sent none: %v", key, sawBody[key])
+		}
+	}
+}

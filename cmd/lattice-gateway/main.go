@@ -169,6 +169,15 @@ type ImageRequest struct {
 	// Loras is a Lattice extension, not an OpenAI field: optional LoRA refs the
 	// sidecar applies at inference time (the sidecar takes [{name, scale}]).
 	Loras []ImageLora `json:"loras,omitempty"`
+	// The sidecar's tuning knobs, same status as Loras: Lattice extensions on
+	// the body, forwarded only when the client sends them. Seed and Strength
+	// are pointers because sidecar-side 0 is a meaningful value (literally seed
+	// 0; edit strength 0 = keep the input), not an absent one.
+	Steps          int      `json:"steps,omitempty"`
+	Guidance       float64  `json:"guidance,omitempty"`
+	NegativePrompt string   `json:"negative_prompt,omitempty"`
+	Seed           *int     `json:"seed,omitempty"`
+	Strength       *float64 `json:"strength,omitempty"`
 	// SidecarModel is not client-owned: handleImage fills it from the registry's
 	// upstream mapping when the requested image model names one, and it is what
 	// selects the model the sidecar loads. Empty keeps the sidecar's env-default

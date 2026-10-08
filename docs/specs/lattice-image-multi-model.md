@@ -50,6 +50,19 @@ for the user's own artwork — the content boundary recorded in
 - `Loras` (`json:"loras,omitempty"`) — a Lattice extension on the images body
   (not an OpenAI field), forwarded to the sidecar's `[{name, scale}]` LoRA refs,
   which the sidecar already supported per-request.
+- `Steps` / `Guidance` / `NegativePrompt` / `Seed` / `Strength` — the sidecar's
+  tuning knobs on the same extension footing as `loras`: they ride the images
+  body and are forwarded only when the client sends them, so this stays a
+  strict no-op for bodies that don't carry them. `Seed` and `Strength` are
+  pointers (`*int`, `*float64`) because sidecar-side 0 is meaningful (literal
+  seed 0; edit strength 0 = keep the input, vs the sidecar's absent-key default
+  of 0.4), and `omitempty` on a plain int/float cannot express "sent as 0".
+  `Strength` is forwarded only on an edit, since the sidecar carries it
+  positionally after `--image` in the CLI argv. These are what let the
+  OpenAI-shaped clients below (the Hermes plugin, the MCP server) keep their
+  sidecar tunables *through* the lattice instead of losing them — the frontend's
+  `buildProxyBody` re-marshals a plain `map[string]interface{}`, so unknown keys
+  pass through untouched.
 
 Why `upstream` and not a new config shape: `resolveModel` already returns it,
 the config format already carries it (`{ "name": …, "upstream": … }`, used by
@@ -137,12 +150,19 @@ Measured live 2026-10-07, all three models, from the Pi frontend
 
 ## 6. Open items
 
-- **Hermes plugin / MCP `model` field.** The Hermes `mflux` image_gen plugin
-  still targets its sidecar URL directly with a single hard-coded model, and
-  the MCP server / gateway default model name (`flux-dev`) assumes the M1's
-  registry. Selecting `qwen-image-2.1` or `flux-uncensored` today requires an
-  explicit `model` in the request body (as the acceptance runs did). Wiring
-  the plugin and MCP default through the registry names is the next step.
+- **Hermes plugin / MCP `model` field (resolved 2026-10-08).** Both clients now
+  speak OpenAI Images shape at the frontend with **registry model names**:
+  - The MCP server's default model moved to `LATTICE_IMAGEGEN_MODEL` (committed
+    fallback `flux-dev`), and both tools accept an optional `model` parameter —
+    DSH can request `z-image-turbo`, `qwen-image-2.1`, `flux-uncensored`, ….
+  - The Hermes `mflux` plugin was rewritten from direct sidecar calls to the
+    frontend routes: `image_gen.mflux.url` now names the frontend (Pi loopback),
+    `image_gen.mflux.model` names the default registry model, and the sidecar
+    tuneables (`steps`/`guidance`/`seed`/`negative_prompt`/edit `strength`)
+    still travel, as the §2.1 Lattice extensions. The direct-sidecar variant was
+    rejected because one sidecar = one image CLI: multi-model direct would have
+    needed a URL per sidecar port (:8899/:8898/:8897) instead of one registry
+    name.
 - **Qwen-Image 20B 4-bit.** The 32 GB M6 takes the 7.1 B model at 10 GB peak;
   the 20 B at ~26 GB is borderline against resident chat and is deferred
   until the Ollama residency on the M6 is measured concurrent with it.

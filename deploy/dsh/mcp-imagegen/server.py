@@ -22,6 +22,9 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import ImageContent
 
 FRONTEND = os.environ.get("LATTICE_FRONTEND_URL", "http://127.0.0.1:8080")
+# Images are named in the gateway registry (lattice model names, not OpenAI's);
+# the launch env picks the host's default, the code only carries a fallback.
+DEFAULT_MODEL = os.environ.get("LATTICE_IMAGEGEN_MODEL", "flux-dev")
 TIMEOUT = int(os.environ.get("LATTICE_IMAGE_TIMEOUT_S", "7200"))
 
 mcp = MCPServer("lattice-imagegen")
@@ -31,8 +34,12 @@ def _image(b64: str) -> ImageContent:
     return ImageContent(type="image", data=b64, mime_type="image/png")
 
 
-def _generate(prompt: str, size: str | None, n: int, model: str = "flux-dev") -> list[ImageContent]:
-    body = {"model": model, "prompt": prompt, "n": n, "response_format": "b64_json"}
+def _model(model: str) -> str:
+    return model.strip() if model and model.strip() else DEFAULT_MODEL
+
+
+def _generate(prompt: str, size: str | None, n: int, model: str) -> list[ImageContent]:
+    body = {"model": _model(model), "prompt": prompt, "n": n, "response_format": "b64_json"}
     if size:
         body["size"] = size
     req = urllib.request.Request(
@@ -46,8 +53,8 @@ def _generate(prompt: str, size: str | None, n: int, model: str = "flux-dev") ->
     return [_image(item["b64_json"]) for item in payload["data"]]
 
 
-def _edit(image_b64: str, prompt: str, size: str | None, n: int, model: str = "flux-dev") -> list[ImageContent]:
-    body = {"model": model, "image": image_b64, "prompt": prompt, "n": n, "response_format": "b64_json"}
+def _edit(image_b64: str, prompt: str, size: str | None, n: int, model: str) -> list[ImageContent]:
+    body = {"model": _model(model), "image": image_b64, "prompt": prompt, "n": n, "response_format": "b64_json"}
     if size:
         body["size"] = size
     req = urllib.request.Request(
@@ -62,19 +69,24 @@ def _edit(image_b64: str, prompt: str, size: str | None, n: int, model: str = "f
 
 
 @mcp.tool()
-def generate_image(prompt: str, size: str = "512x512", n: int = 1) -> list[ImageContent]:
-    """Generate an image from a text prompt via Lattice's local FLUX model.
+def generate_image(prompt: str, size: str = "512x512", n: int = 1, model: str = "") -> list[ImageContent]:
+    """Generate an image from a text prompt via Lattice's image route.
 
     size is WxH in pixels ("256x256", "512x512", "1024x1024"); smaller is much
-    faster. n is the number of images. Returns the image(s) as PNG content.
+    faster. n is the number of images. model is a registry name (e.g.
+    "flux-dev", "z-image-turbo", "qwen-image-2.1", "flux-uncensored"); empty
+    uses the gateway's configured default. Returns the image(s) as PNG content.
     """
-    return _generate(prompt, size, n)
+    return _generate(prompt, size, n, model)
 
 
 @mcp.tool()
-def generate_image_edit(image_b64: str, prompt: str, size: str = "512x512", n: int = 1) -> list[ImageContent]:
-    """Edit an existing image (base64) guided by a text prompt, via Lattice's FLUX."""
-    return _edit(image_b64, prompt, size, n)
+def generate_image_edit(image_b64: str, prompt: str, size: str = "512x512", n: int = 1, model: str = "") -> list[ImageContent]:
+    """Edit an existing image (base64) guided by a text prompt, via Lattice's image route.
+
+    model is an optional registry name; empty uses the gateway's default.
+    """
+    return _edit(image_b64, prompt, size, n, model)
 
 
 if __name__ == "__main__":

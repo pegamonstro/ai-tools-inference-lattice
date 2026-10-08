@@ -496,6 +496,21 @@ func (p *MfluxProvider) oneImage(ctx context.Context, req ImageRequest, op strin
 	if len(req.Loras) > 0 {
 		body["loras"] = req.Loras
 	}
+	if req.Steps > 0 {
+		body["steps"] = req.Steps
+	}
+	if req.Guidance > 0 {
+		body["guidance"] = req.Guidance
+	}
+	if req.NegativePrompt != "" {
+		body["negative_prompt"] = req.NegativePrompt
+	}
+	if req.Seed != nil {
+		body["seed"] = *req.Seed
+	}
+	if req.Strength != nil && op == "edit" {
+		body["strength"] = *req.Strength
+	}
 	if op == "edit" {
 		body["init_image"] = req.Image
 	}

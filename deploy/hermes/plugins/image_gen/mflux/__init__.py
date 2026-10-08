@@ -1,21 +1,28 @@
-"""MFLUX (local) image generation backend — FLUX.1-dev + Lustly.ai uncensored LoRA via an MLX sidecar.
+"""Lattice image generation backend — every registry model, through the lattice frontend.
 
-The sidecar runs on the Mac (the only MLX + RAM host) and is driven over the tailnet.
 Unlike the cloud providers there is no API key: availability is the presence of a
-configured sidecar URL, and generation happens on local hardware. Text-to-image and
-image-to-image (edit) both route through the sidecar.
+frontend URL, and generation happens on local hardware. The plugin is a thin OpenAI
+Images client: it POSTs to the frontend's /v1/images routes with a registry model
+name, and the lattice owns the rest — control picks the gateway, the gateway picks
+the sidecar instance (via the model's upstream mapping), the slot and memory margin
+apply, and one telemetry line per request flows. Text-to-image and image-to-image
+(edit) both route through the frontend; the edit's base64 rides the request.
 
 Configuration (Hermes ``config.yaml``):
 
     image_gen:
       provider: mflux
       mflux:
-        url: http://<mac-tailnet>:8899   # required; no default, per the no-address rule
-        token: ""                         # optional; must match the sidecar's MFLUX_TOKEN
-        size: small                       # optional; "small" (⅓–¼ px, default) or "medium" (~1MP)
+        url: http://127.0.0.1:8080   # required; the lattice frontend, per the no-address rule
+        model: flux-uncensored         # optional; a registry model name for the default
+        size: small                    # optional; "small" (⅓–¼ px, default) or "medium" (~1MP)
 
-The plugin's ``is_available()`` deliberately does NOT probe the sidecar — the picker
-calls it on every paint and must not block on the network; a down sidecar surfaces as
+Model ids are registry names (flux-uncensored, z-image-turbo, qwen-image-2.1, …),
+the same names the gateway registry — host runtime ``gateway-providers.json`` —
+carries. An unset model omits the field and the gateway's default applies.
+
+The plugin's ``is_available()`` deliberately does NOT probe the frontend — the picker
+calls it on every paint and must not block on the network; a down lattice surfaces as
 a connection error at generation time instead.
 """
 
@@ -35,26 +42,37 @@ from plugins.image_gen._common import load_image_gen_config
 
 logger = __import__("logging").getLogger(__name__)
 
-_MODEL_ID = "flux-uncensored"
+# The gateway's own default when a request omits the model entirely.
+_GATEWAY_DEFAULT_MODEL = "flux-dev"
 
-# FLUX.1-dev sizes (multiples of 64) for the three Hermes aspects. Pixel count is the
-# load lever: the diffusion transformer denoises the whole canvas regardless of prompt,
-# so "small" (⅓–¼ the pixels) is what cuts compute and memory on the 16 GB host.
+# Sizes (multiples of 64) for the three Hermes aspects. Pixel count is the
+# load lever: the diffusion transformer denoises the whole canvas regardless of
+# prompt, so "small" (⅓–¼ the pixels) is what cuts compute and memory on the
+# 16 GB host.
 _SIZES = {
     "small":  {"landscape": (768, 448), "square": (512, 512), "portrait": (448, 768)},
     "medium": {"landscape": (1344, 768), "square": (1024, 1024), "portrait": (768, 1344)},
 }
 _DEFAULT_SIZE = "small"
 
-# Must outlast the sidecar's own GEN_TIMEOUT (3600) — the plugin waits on the backend
-# it drives, and a 4-step image can exceed 30 min when the M1 is under load.
+# Must outlast the sidecar's own GEN_TIMEOUT (3600) — the plugin waits on the
+# backend it drives, and a 4-step image can exceed 30 min when a host is under load.
 _GEN_TIMEOUT = 3600
 
+# Lattice extensions the gateway forwards to the sidecar (not OpenAI fields).
+_TUNABLES = ("negative_prompt", "steps", "guidance", "seed")
 
-def _sidecar_url() -> Optional[str]:
+
+def _frontend_url() -> Optional[str]:
     cfg = load_image_gen_config("mflux")
-    raw = os.environ.get("MFLUX_SIDECAR_URL") or cfg.get("url") or cfg.get("endpoint")
+    raw = os.environ.get("LATTICE_FRONTEND_URL") or cfg.get("url") or cfg.get("endpoint")
     return raw.strip().rstrip("/") if isinstance(raw, str) and raw.strip() else None
+
+
+def _configured_model() -> Optional[str]:
+    cfg = load_image_gen_config("mflux")
+    raw = os.environ.get("LATTICE_IMAGEGEN_MODEL") or cfg.get("model")
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None
 
 
 def _configured_size() -> Optional[str]:
@@ -67,12 +85,6 @@ def _resolve_size(value: Optional[str]) -> str:
     """Clamp a size request to ``_SIZES``; unknown values coerce to the default."""
     v = value.strip().lower() if isinstance(value, str) else ""
     return v if v in _SIZES else _DEFAULT_SIZE
-
-
-def _sidecar_token() -> str:
-    cfg = load_image_gen_config("mflux")
-    raw = os.environ.get("MFLUX_SIDECAR_TOKEN") or cfg.get("token")
-    return raw.strip() if isinstance(raw, str) and raw.strip() else ""
 
 
 def _image_bytes(source: str) -> bytes:
@@ -90,7 +102,7 @@ def _image_bytes(source: str) -> bytes:
 
 
 class MfluxImageGenProvider(ImageGenProvider):
-    """Local uncensored diffusion backend delegating to the Mac-side mflux sidecar."""
+    """Local diffusion backend delegating every model to the lattice image route."""
 
     @property
     def name(self) -> str:
@@ -98,24 +110,25 @@ class MfluxImageGenProvider(ImageGenProvider):
 
     @property
     def display_name(self) -> str:
-        return "MFLUX (local)"
+        return "Lattice (local image)"
 
     def is_available(self) -> bool:
         # No network call (the picker calls this on every paint): available iff the
-        # sidecar URL is configured. A down sidecar is a runtime error, not absence.
-        return _sidecar_url() is not None
+        # frontend URL is configured. A down lattice is a runtime error, not absence.
+        return _frontend_url() is not None
 
     def list_models(self) -> List[Dict[str, Any]]:
+        model = _configured_model() or _GATEWAY_DEFAULT_MODEL
         return [{
-            "id": _MODEL_ID,
-            "display": "Flux Uncensored (Lustly.ai v1, local MLX)",
-            "speed": "~2–5 min on M1 16 GB",
-            "strengths": "Uncensored text-to-image & editing, fully local",
+            "id": model,
+            "display": f"{model} (registry name, via lattice)",
+            "speed": "~10 s on M6 (32 GB), ~2 min on M1 (16 GB)",
+            "strengths": "Text-to-image & editing, fully local, multi-model",
             "price": "local",
         }]
 
     def default_model(self) -> Optional[str]:
-        return _MODEL_ID
+        return _configured_model() or _GATEWAY_DEFAULT_MODEL
 
     def capabilities(self) -> Dict[str, Any]:
         return {"modalities": ["text", "image"], "max_reference_images": 1}
@@ -129,10 +142,10 @@ class MfluxImageGenProvider(ImageGenProvider):
         reference_image_urls: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        url = _sidecar_url()
+        url = _frontend_url()
         if url is None:
             return error_response(
-                error="mflux sidecar is not configured (set image_gen.mflux.url)",
+                error="lattice frontend is not configured (set image_gen.mflux.url)",
                 error_type="configuration", provider="mflux", prompt=prompt,
                 aspect_ratio=aspect_ratio,
             )
@@ -141,69 +154,70 @@ class MfluxImageGenProvider(ImageGenProvider):
         size = _resolve_size(kwargs.get("size") or _configured_size())
         width, height = _SIZES[size][aspect]
 
-        payload: Dict[str, Any] = {"prompt": prompt, "width": width, "height": height}
-        for key in ("negative_prompt", "steps", "guidance", "seed"):
+        # OpenAI Images shape, route names a registry model; the tunables ride
+        # the same body as Lattice extensions the gateway forwards downstream.
+        payload: Dict[str, Any] = {"prompt": prompt, "size": f"{width}x{height}", "n": 1}
+        model = _configured_model()
+        if model:
+            payload["model"] = model
+        for key in _TUNABLES:
             if kwargs.get(key) is not None:
                 payload[key] = kwargs[key]
 
         is_edit = bool(image_url)
         if is_edit:
             try:
-                payload["init_image"] = base64.b64encode(_image_bytes(image_url)).decode("ascii")
+                payload["image"] = base64.b64encode(_image_bytes(image_url)).decode("ascii")
             except Exception as exc:  # noqa: BLE001
                 return error_response(
                     error=f"could not read source image: {exc}", error_type="invalid_argument",
-                    provider="mflux", model=_MODEL_ID, prompt=prompt, aspect_ratio=aspect,
+                    provider="mflux", model=model or _GATEWAY_DEFAULT_MODEL, prompt=prompt, aspect_ratio=aspect,
                 )
             if kwargs.get("strength") is not None:
                 payload["strength"] = kwargs["strength"]
 
-        headers = {}
-        token = _sidecar_token()
-        if token:
-            headers["X-Mflux-Token"] = token
-
         try:
-            resp = requests.post(f"{url}/{'edit' if is_edit else 'generate'}", json=payload, headers=headers, timeout=_GEN_TIMEOUT)
+            resp = requests.post(
+                f"{url}/v1/images/{'edits' if is_edit else 'generations'}",
+                json=payload, timeout=_GEN_TIMEOUT,
+            )
             resp.raise_for_status()
             data = resp.json()
         except requests.Timeout:
             return error_response(
-                error="mflux generation timed out", error_type="timeout",
-                provider="mflux", model=_MODEL_ID, prompt=prompt, aspect_ratio=aspect,
+                error="lattice image generation timed out", error_type="timeout",
+                provider="mflux", model=model or _GATEWAY_DEFAULT_MODEL, prompt=prompt, aspect_ratio=aspect,
             )
         except requests.RequestException as exc:
             return error_response(
-                error=f"mflux sidecar unreachable: {exc}", error_type="connection_error",
-                provider="mflux", model=_MODEL_ID, prompt=prompt, aspect_ratio=aspect,
+                error=f"lattice unreachable: {exc}", error_type="connection_error",
+                provider="mflux", model=model or _GATEWAY_DEFAULT_MODEL, prompt=prompt, aspect_ratio=aspect,
             )
         except ValueError as exc:
             return error_response(
-                error=f"mflux sidecar returned invalid JSON: {exc}", error_type="invalid_response",
-                provider="mflux", model=_MODEL_ID, prompt=prompt, aspect_ratio=aspect,
+                error=f"lattice returned invalid JSON: {exc}", error_type="invalid_response",
+                provider="mflux", model=model or _GATEWAY_DEFAULT_MODEL, prompt=prompt, aspect_ratio=aspect,
             )
 
-        if not data.get("image"):
+        items = (data or {}).get("data") or []
+        if not items or not items[0].get("b64_json"):
             return error_response(
-                error=data.get("error") or "mflux returned no image",
-                error_type=data.get("error_type") or "provider_error",
-                provider="mflux", model=_MODEL_ID, prompt=prompt, aspect_ratio=aspect,
+                error=(data or {}).get("error") or "lattice returned no image",
+                error_type=(data or {}).get("error_type") or "provider_error",
+                provider="mflux", model=model or _GATEWAY_DEFAULT_MODEL, prompt=prompt, aspect_ratio=aspect,
             )
 
         try:
-            path = str(save_b64_image(data["image"], prefix="mflux"))
+            path = str(save_b64_image(items[0]["b64_json"], prefix="mflux"))
         except Exception as exc:  # noqa: BLE001
             return error_response(
                 error=f"could not save image to cache: {exc}", error_type="io_error",
-                provider="mflux", model=_MODEL_ID, prompt=prompt, aspect_ratio=aspect,
+                provider="mflux", model=model or _GATEWAY_DEFAULT_MODEL, prompt=prompt, aspect_ratio=aspect,
             )
 
-        extra = {"size": size}
-        if data.get("seed") is not None:
-            extra["seed"] = data["seed"]
         return success_response(
-            image=path, model=_MODEL_ID, prompt=prompt, aspect_ratio=aspect,
-            provider="mflux", extra=extra,
+            image=path, model=model or _GATEWAY_DEFAULT_MODEL, prompt=prompt, aspect_ratio=aspect,
+            provider="mflux", extra={"size": size},
         )
 
 
