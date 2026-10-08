@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lattice SDXL sidecar — macOS LaunchAgent template.
+
+  A second image-generation sidecar for checkpoint families the MLX/mflux runtime
+  cannot load (SDXL text-encoder + VAE stack): SDXL base, Pony, Illustrious, and
+  their fine-tunes/merges. It runs the stable-diffusion.cpp CLI (ggml/Metal) and
+  speaks the same HTTP contract as the mflux sidecar (single-flight sync POST,
+  write-then-respond results persistence), so img-gen routes to it by a per-model
+  `sidecar` field instead of knowing anything else about the backend.
+
+  install-macos.sh substitutes the placeholders and installs the result to
+  ~/Library/LaunchAgents/. SD_BIN is the sd.cpp CLI built from the sidecar host's
+  sd.cpp checkout (Metal); SD_CKPT_DIR is where SDXL-class `.safetensors`
+  checkpoints live (kept separate from the FLUX model dirs). The sidecar is
+  unauthenticated with SD_BIND forced to 0.0.0.0 so img-gen (on another host) can
+  reach it over the tailnet, matching the mflux and esrgan sidecars' posture.
+  Port 8902 (8899 mflux, 8900 speech, 8901 esrgan).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lattice.sdxl</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__SD_PYTHON__</string>
+        <string>__REPO_ROOT__/deploy/sd-sidecar.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SD_BIN</key>
+        <string>__SD_BIN__</string>
+        <key>SD_CKPT_DIR</key>
+        <string>__SD_CKPT_DIR__</string>
+        <key>SD_RESULTS_DIR</key>
+        <string>__SD_RESULTS_DIR__</string>
+        <key>SD_BIND</key>
+        <string>0.0.0.0</string>
+        <key>SD_PORT</key>
+        <string>8902</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/lattice-sdxl.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/lattice-sdxl.err.log</string>
+</dict>
+</plist>

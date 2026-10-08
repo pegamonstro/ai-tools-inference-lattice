@@ -309,6 +309,48 @@ else
   echo "note: realesrgan-mlx not found at $ESRGAN_BIN — skipping the esrgan sidecar."
 fi
 
+# The SDXL sidecar — a second image-generation backend for checkpoint families the
+# MLX/mflux runtime cannot load (SDXL text-encoder + VAE stack: SDXL base, Pony,
+# Illustrious, merges). It wraps the stable-diffusion.cpp CLI built from a sd.cpp
+# checkout on this host (Metal), and speaks the same HTTP contract as the mflux
+# sidecar so img-gen routes to it purely by a per-model `sidecar` field. Like the
+# other optional sidecars it is only supervised when its binary is present; the
+# checkpoints dir and results dir live outside the repo (username paths).
+SDXL_LABEL="com.lattice.sdxl"
+SDXL_TEMPLATE="$REPO_ROOT/deploy/$SDXL_LABEL.plist.in"
+SDXL_PYTHON="/usr/bin/python3"
+SDXL_BIN="$HOME/sd.cpp/build/bin/sd-cli"
+SDXL_CKPT_DIR="$HOME/mflux-models/sdxl"
+SDXL_RESULTS_DIR="$HOME/sd-outputs"
+SDXL_DEST="$HOME/Library/LaunchAgents/$SDXL_LABEL.plist"
+
+if [[ -x "$SDXL_BIN" ]]; then
+  launchctl bootout "$DOMAIN/$SDXL_LABEL" 2>/dev/null || true
+  busy="$(lsof -nP -iTCP:8902 -sTCP:LISTEN -t 2>/dev/null || true)"
+  if [[ -n "$busy" ]]; then
+    for pid in $busy; do
+      if [[ "$(ps -o command= -p "$pid" 2>/dev/null)" == *sd-sidecar.py* ]]; then
+        echo "error: an unmanaged sd sidecar (pid $pid) is holding :8902." >&2
+        echo "stop it, then re-run this script:" >&2
+        echo "  kill $pid" >&2
+        exit 1
+      fi
+    done
+  fi
+  sed -e "s|__SD_PYTHON__|$SDXL_PYTHON|g" -e "s|__SD_BIN__|$SDXL_BIN|g" -e "s|__SD_CKPT_DIR__|$SDXL_CKPT_DIR|g" -e "s|__SD_RESULTS_DIR__|$SDXL_RESULTS_DIR|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
+    "$SDXL_TEMPLATE" >"$SDXL_DEST"
+  launchctl bootstrap "$DOMAIN" "$SDXL_DEST"
+  if launchctl print "$DOMAIN/$SDXL_LABEL" >/dev/null 2>&1; then
+    echo "installed: $SDXL_DEST"
+    echo "running  : $DOMAIN/$SDXL_LABEL"
+    echo "logs     : $LOG_DIR/lattice-sdxl.{out,err}.log"
+  else
+    echo "warning: sdxl bootstrap failed — check $LOG_DIR/lattice-sdxl.err.log" >&2
+  fi
+else
+  echo "note: stable-diffusion.cpp CLI not found at $SDXL_BIN — skipping the sdxl sidecar."
+fi
+
 # The IOGPU wired-memory-limit daemon is a LaunchDaemon (system domain, root), so it is
 # installed by its own sudo script rather than here — this script runs without sudo.
 #   sudo ./deploy/install-iogpu.sh
