@@ -105,8 +105,8 @@ func loadProviders(cfgPath string) (*providerRegistry, map[string]Provider, erro
 			provs[p.Name] = &OllamaProvider{Endpoint: p.Endpoint}
 		case "mlx":
 			provs[p.Name] = &MLXProvider{Endpoint: p.Endpoint}
-		case "mflux":
-			provs[p.Name] = &MfluxProvider{Endpoint: p.Endpoint}
+		case "mflux", "sdxl":
+			provs[p.Name] = &MfluxProvider{Endpoint: p.Endpoint, name: p.Kind}
 		case "speech":
 			provs[p.Name] = &SpeechProvider{Endpoint: p.Endpoint}
 		default:
@@ -179,7 +179,7 @@ func (reg *providerRegistry) announcedCapabilities() []string {
 		case "ollama":
 			add("embeddings")
 			add("tool_calling")
-		case "mflux":
+		case "mflux", "sdxl":
 			add("image_generation")
 		case "speech":
 			add("speech_recognition")
@@ -225,16 +225,16 @@ func (reg *providerRegistry) announcedModels(ollamaTags []string) []string {
 }
 
 // announcedImageModels is the image half of the /health announcement: every
-// registry name served through an image provider (kind "mflux" — the family
-// includes mflux-zimage and mflux-qwen siblings). It rides the announcement
-// beside the flat Models list so a client asking "what can I generate with"
-// gets the zoo instead of guessing which of the announced names is an image
-// model. Sorted so the announced list does not depend on config order.
+// registry name served through an image provider (the "mflux" family and the
+// "sdxl" engine). It rides the announcement beside the flat Models list so a
+// client asking "what can I generate with" gets the zoo instead of guessing
+// which of the announced names is an image model. Sorted so the announced list
+// does not depend on config order.
 func (reg *providerRegistry) announcedImageModels() []string {
 	seen := map[string]bool{}
 	var out []string
 	for pn, kind := range reg.providerKinds {
-		if !strings.HasPrefix(kind, "mflux") {
+		if !isImageKind(kind) {
 			continue
 		}
 		for _, m := range reg.served[pn] {
@@ -453,20 +453,38 @@ type ImageProvider interface {
 	EditImage(ctx context.Context, req ImageRequest) (*ImageResponse, error)
 }
 
-// MfluxProvider is an HTTP client for the mflux sidecar (deploy/mflux-sidecar.py),
-// which serves FLUX over POST /generate and /edit. It is image-only: Execute
-// fails loudly, because a chat request naming the image model is a routing fault
+// MfluxProvider is an HTTP client for the image sidecars that share one body
+// contract: the mflux sidecar (deploy/mflux-sidecar.py, POST /generate and
+// /edit) and the stable-diffusion.cpp sidecar (deploy/sd-sidecar.py), which
+// speaks the same keys behind the "sdxl" kind. It is image-only: Execute fails
+// loudly, because a chat request naming the image model is a routing fault
 // that must not be silently re-homed to Ollama.
 type MfluxProvider struct {
 	Endpoint string
+	// name is the registry kind string this provider was configured with
+	// ("mflux", "sdxl"); it prefixes errors so an SDXL failure does not read
+	// as an mflux one. Empty keeps the historic "mflux".
+	name string
 }
 
-func (p *MfluxProvider) Name() string { return "mflux" }
+func (p *MfluxProvider) Name() string {
+	if p.name == "" {
+		return "mflux"
+	}
+	return p.name
+}
+
+// isImageKind reports whether a registry kind is an image engine. The FLUX
+// family shares the "mflux" prefix (mflux, mflux-zimage, mflux-qwen); the
+// stable-diffusion.cpp sidecar registers as "sdxl".
+func isImageKind(kind string) bool {
+	return strings.HasPrefix(kind, "mflux") || kind == "sdxl"
+}
 
 // Execute exists only to satisfy Provider. A chat request that names the image
 // model reaches here and must fail loudly rather than be silently dropped.
 func (p *MfluxProvider) Execute(ctx context.Context, req Request) (*Response, error) {
-	return nil, fmt.Errorf("mflux is an image provider, not a chat provider")
+	return nil, fmt.Errorf("%s is an image provider, not a chat provider", p.Name())
 }
 
 func (p *MfluxProvider) GenerateImage(ctx context.Context, req ImageRequest) (*ImageResponse, error) {
@@ -490,7 +508,7 @@ func (p *MfluxProvider) runImage(ctx context.Context, req ImageRequest, op strin
 		return nil, fmt.Errorf("response_format %q unsupported: the sidecar returns base64 only, use b64_json", req.ResponseFormat)
 	}
 	if op == "edit" && req.Mask != "" {
-		return nil, fmt.Errorf("mask is not supported by the mflux sidecar")
+		return nil, fmt.Errorf("mask is not supported by the sidecar")
 	}
 
 	n := req.N
@@ -566,16 +584,19 @@ func (p *MfluxProvider) oneImage(ctx context.Context, req ImageRequest, op strin
 		if msg == "" {
 			msg = fmt.Sprintf("sidecar status %d", resp.StatusCode)
 		}
-		return ImageDataItem{}, fmt.Errorf("mflux: %s", msg)
+		return ImageDataItem{}, fmt.Errorf("%s: %s", p.Name(), msg)
 	}
 
 	var side struct {
 		Image string `json:"image"`
+		Seed  int64  `json:"seed"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&side); err != nil {
 		return ImageDataItem{}, err
 	}
-	return ImageDataItem{B64JSON: side.Image}, nil
+	// The echoed seed is the run's identity: a client that wants this exact
+	// picture again resends it (seed 0 included — it is a legal seed).
+	return ImageDataItem{B64JSON: side.Image, Seed: side.Seed}, nil
 }
 
 // parseImageSize turns OpenAI's "WxH" size into the sidecar's width/height.

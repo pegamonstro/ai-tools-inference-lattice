@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -187,6 +188,89 @@ func TestLoadProvidersRegistersMfluxAndAnnouncesImageGeneration(t *testing.T) {
 	models := reg.announcedModels(nil)
 	if len(models) != 1 || models[0] != "flux-dev" {
 		t.Errorf("announcedModels = %v, want [flux-dev]", models)
+	}
+}
+
+// The stable-diffusion.cpp engine shares the mflux image body contract, so
+// kind "sdxl" registers as the same provider type under its own kind name, and
+// the announcement must list its models as image models beside the mflux zoo —
+// otherwise control would route to this gateway for sdxl pins and the image
+// registry would not know they exist.
+func TestLoadProvidersRegistersSdxlKind(t *testing.T) {
+	cfg := `{
+		"default_provider": "ollama",
+		"providers": [
+			{"name": "ollama", "kind": "ollama", "endpoint": "http://localhost:11434"},
+			{"name": "sdxl", "kind": "sdxl", "endpoint": "http://127.0.0.1:8902"}
+		],
+		"models": [
+			{"name": "sdxl-base", "provider": "sdxl"}
+		]
+	}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "providers.json")
+	if err := os.WriteFile(path, []byte(cfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg, provs, err := loadProviders(path)
+	if err != nil {
+		t.Fatalf("loadProviders: %v", err)
+	}
+	if _, ok := provs["sdxl"].(*MfluxProvider); !ok {
+		t.Errorf("sdxl provider not registered as *MfluxProvider")
+	}
+	if !contains(reg.announcedCapabilities(), "image_generation") {
+		t.Errorf("announcedCapabilities missing image_generation: %v", reg.announcedCapabilities())
+	}
+	imgs := reg.announcedImageModels()
+	if len(imgs) != 1 || imgs[0] != "sdxl-base" {
+		t.Errorf("announcedImageModels = %v, want [sdxl-base]", imgs)
+	}
+	models := reg.announcedModels(nil)
+	if len(models) != 1 || models[0] != "sdxl-base" {
+		t.Errorf("announcedModels = %v, want [sdxl-base]", models)
+	}
+}
+
+// Both image engines echo the seed the run actually used; the response must
+// carry it beside the image so a client can reproduce the picture by resending
+// it — the seed the client sent was only a request, and the engine may have
+// replaced it with its own.
+func TestImageProviderReturnsTheSidecarSeed(t *testing.T) {
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"image":"aW1hZ2U=","seed":424242,"width":512,"height":512,"seconds":1.0}`))
+	}))
+	defer sidecar.Close()
+
+	p := &MfluxProvider{Endpoint: sidecar.URL}
+	res, err := p.GenerateImage(context.Background(), ImageRequest{Prompt: "a cat", Size: "512x512"})
+	if err != nil {
+		t.Fatalf("GenerateImage: %v", err)
+	}
+	if len(res.Data) != 1 || res.Data[0].Seed != 424242 {
+		t.Errorf("seed did not reach the response: %+v", res.Data)
+	}
+}
+
+// An error from the sd engine must name the engine's kind, not mflux's —
+// otherwise a failed SDXL job reads as an mflux failure on the client's side.
+func TestSdxlProviderErrorsNameTheKind(t *testing.T) {
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer sidecar.Close()
+
+	p := &MfluxProvider{Endpoint: sidecar.URL, name: "sdxl"}
+	_, err := p.GenerateImage(context.Background(), ImageRequest{Prompt: "a cat", Size: "512x512"})
+	if err == nil {
+		t.Fatal("GenerateImage: want an error")
+	}
+	if !strings.Contains(err.Error(), `sdxl: boom`) {
+		t.Errorf("error = %q, want an sdxl-prefixed message", err)
 	}
 }
 

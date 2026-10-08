@@ -151,9 +151,9 @@ type Usage struct {
 }
 
 // ImageRequest is the OpenAI Images API request. It is a closed shape on
-// purpose: the mflux sidecar honours only prompt, size and count, so the
-// request carries exactly those and the edit source image. An unsupported
-// OpenAI field (quality, style) never reaches a type that would swallow it.
+// purpose: an image request carries the OpenAI fields the engine honours plus
+// the Lattice extensions documented below. An unsupported OpenAI field
+// (quality, style) never reaches a type that would swallow it.
 type ImageRequest struct {
 	Model          string `json:"model"`
 	Prompt         string `json:"prompt"`
@@ -199,6 +199,12 @@ type ImageResponse struct {
 
 type ImageDataItem struct {
 	B64JSON string `json:"b64_json"`
+	// Seed is a Lattice extension: the seed the sidecar's run actually used,
+	// echoed so a client can reproduce the image by resending it (the client's
+	// seed field was only a request — an unsent seed becomes the engine's own
+	// random one, and that value is what reproduces the picture). Always
+	// emitted: seed 0 is a meaningful seed, not an absence.
+	Seed int64 `json:"seed"`
 }
 
 // TranscriptionRequest is the OpenAI /v1/audio/transcriptions request, adapted to
