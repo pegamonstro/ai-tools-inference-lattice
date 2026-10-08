@@ -5,7 +5,8 @@
     { "name": "mflux", "kind": "mflux", "endpoint": "http://127.0.0.1:8899" },
     { "name": "speech", "kind": "speech", "endpoint": "http://127.0.0.1:8900" },
     { "name": "mflux-zimage", "kind": "mflux", "endpoint": "http://127.0.0.1:8898" },
-    { "name": "mflux-qwen", "kind": "mflux", "endpoint": "http://127.0.0.1:8897" }
+    { "name": "mflux-qwen", "kind": "mflux", "endpoint": "http://127.0.0.1:8897" },
+    { "name": "sdxl", "kind": "sdxl", "endpoint": "http://127.0.0.1:8902" }
   ],
   "models": [
     { "name": "qwen-image-2.1", "provider": "mflux-qwen" },

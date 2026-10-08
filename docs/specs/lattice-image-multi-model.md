@@ -195,3 +195,31 @@ Measured live 2026-10-07, all three models, from the Pi frontend
   so future syncs are idempotent. The committed file tracks the M1's
   registry; any host that diverges from it gets its own runtime-config file
   rather than dirtying the checkout.
+- **SDXL engine on the lattice (resolved 2026-10-08).** The
+  stable-diffusion.cpp sidecar is now a first-class gateway provider kind:
+  `kind: "sdxl"` registers like `kind: "mflux"` — the same provider type, since
+  both engines share one body contract (`prompt`/`width`/`height`/`loras`/…,
+  `/generate` + `/edit`, `{image, seed}` responses) — announced under
+  `image_generation` and listed in `image_models`, so control routes sdxl pins
+  to the pinning gateway. The shipped `deploy/gateway-providers.json` gains the
+  `sdxl` provider entry (loopback endpoint only). The image response also grew
+  one Lattice extension: `data[0].seed` — the seed the sidecar's run actually
+  used, echoed beside the image — because a client-sent seed is only a request
+  and the engine may have replaced it with its own; it is always emitted, since
+  seed 0 is a meaningful seed, not an absence. Both engines honour it.
+- **Model names and host paths on the image path (resolved 2026-10-08).** For
+  the img-gen consumer, the `model` field sent to the frontend is the img-gen
+  catalog key (`persephone`, `fluxedup`, `dev`, `sdxl-base`, `sdxl-pony`,
+  `sdxl-illustrious`); the lattice `defaultImageModel` is `flux-dev`, so a
+  serving host pins both names for the same upstream. The pin (registry name →
+  sidecar) lives in each host's runtime config, with `upstream` — the real
+  model file paths, still banned from tracked files — beside it; the repo file
+  keeps model repo ids and loopback endpoints only. LoRA values ride the
+  request body verbatim as the `loras` extension (no registry involvement, and
+  HF ids work beside file paths). img-gen now submits generate/edit through the
+  frontend routes (`POST /v1/images/generations|edits`) gated by an explicit
+  `IMAGE_ROUTING` switch (default lattice); the remaining ops (pose, fill,
+  redux, upscale) and all job progress/cancel calls stay direct-sidecar until
+  the gateway proxies those endpoints too. The gateway's own image polling
+  (memory/slot) is unchanged; long SDXL runs rely on the existing
+  `LATTICE_GATEWAY_IMAGE_MARGIN_MB` budget discipline.

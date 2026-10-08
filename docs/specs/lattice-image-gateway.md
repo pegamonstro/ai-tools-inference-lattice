@@ -69,7 +69,9 @@ Mirror `handleEmbeddings` exactly — it is the template for a new modality:
 
 - `POST /v1/images/generations` — body is OpenAI Images (`model?`, `prompt`, `n?`,
   `size?`, `response_format?`). Translate to the sidecar's `/generate`; translate
-  the sidecar's `{image: b64, seed, …}` back to `{created, data: [{b64_json}]}`.
+  the sidecar's `{image: b64, seed, …}` back to `{created, data: [{b64_json}]}`
+  (the sidecar seed is echoed beside it as a Lattice extension — see the
+  multi-model spec).
 - `POST /v1/images/edits` — `model?`, `image`, `prompt`, `mask?`, `n?`, `size?` →
   sidecar `/edit` (which adds `init_image`/`strength`).
 - A new provider **kind `mflux`** in `providerConfigFile` (`providers.go`), with
