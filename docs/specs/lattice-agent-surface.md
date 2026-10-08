@@ -98,9 +98,16 @@ the name is never lost.
 Two read-only endpoints, served by the frontend:
 
 - **`GET /v1/models`** — the client-facing namespace: the capability aliases,
-  each with a `context_length` reflecting the real ceiling (§3.5). This is the
+  each with a `context_length` reflecting the real ceiling (§3.5), plus the
+  aggregated image registry entries, marked `"image_model": true` (extended
+  2026-10-08: a probing client reads one list — a chat-only menu made the image
+  zoo invisible; the filtered view stays on `/v1/images/models`). This is the
   namespace clients are *expected* to use, so it is the namespace it advertises.
 - **`GET /health`** — frontend liveness. Cheap, and the natural probe target.
+
+The gateway exposes the same contract (`GET /v1/models` merging the chat and
+image announcements of its own `/health`, image models marked) so a client
+pointed at either surface sees the same menu.
 
 > **This is the highest-leverage change in the spec.** The external misread was
 > a *discovery* failure: a single-route service is indistinguishable from a

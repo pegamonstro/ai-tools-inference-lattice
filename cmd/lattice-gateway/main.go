@@ -1683,23 +1683,18 @@ func speechCapability(model string) (SpeechCapability, string, bool) {
 	return sp, providerName, ok
 }
 
-func handleHealth(w http.ResponseWriter, r *http.Request) {
-	if !budgeter.CanAccommodate() {
-		http.Error(w, "Memory pressure high", http.StatusServiceUnavailable)
-		return
-	}
-
+// ollamaTags fetches the local model inventory Ollama serves, as flat tag
+// names plus the sizes (size>0 only — the slot recompute skips unsized ones).
+// The announcement handlers share it so they cannot drift apart.
+func ollamaTags() ([]string, []int64, error) {
 	resp, err := http.Get(ollamaURL + "/api/tags")
 	if err != nil {
-		http.Error(w, "Ollama unhealthy", http.StatusServiceUnavailable)
-		return
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		http.Error(w, "Ollama unhealthy", http.StatusServiceUnavailable)
-		return
+		return nil, nil, fmt.Errorf("ollama /api/tags returned %d", resp.StatusCode)
 	}
-
 	var tags struct {
 		Models []struct {
 			Name string `json:"name"`
@@ -1707,8 +1702,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		} `json:"models"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
-		http.Error(w, "Ollama unhealthy", http.StatusServiceUnavailable)
-		return
+		return nil, nil, err
 	}
 	tagNames := make([]string, 0, len(tags.Models))
 	sizes := make([]int64, 0, len(tags.Models))
@@ -1717,6 +1711,75 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		if m.Size > 0 {
 			sizes = append(sizes, m.Size)
 		}
+	}
+	return tagNames, sizes, nil
+}
+
+// handleModels serves the OpenAI discovery contract: one /v1/models carrying
+// the whole served zoo — registry pins, Ollama tags, image models — with image
+// models marked, so a probing client lists the menu and names something it
+// will actually be served. It shares the announcement logic with /health; only
+// the shape differs.
+func handleModels(w http.ResponseWriter, r *http.Request) {
+	if !budgeter.CanAccommodate() {
+		http.Error(w, "Memory pressure high", http.StatusServiceUnavailable)
+		return
+	}
+	tagNames, _, err := ollamaTags()
+	if err != nil {
+		http.Error(w, "Ollama unhealthy", http.StatusServiceUnavailable)
+		return
+	}
+
+	models := tagNames
+	imageModels := []string{}
+	if registry != nil {
+		models = registry.announcedModels(tagNames)
+		imageModels = registry.announcedImageModels()
+	}
+
+	imageSet := map[string]bool{}
+	for _, m := range imageModels {
+		imageSet[m] = true
+	}
+	data := make([]map[string]any, 0, len(models)+len(imageModels))
+	seen := map[string]bool{}
+	for _, m := range models {
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		if imageSet[m] {
+			data = append(data, map[string]any{"id": m, "object": "model", "owned_by": "lattice", "image_model": true})
+			continue
+		}
+		data = append(data, map[string]any{"id": m, "object": "model", "owned_by": "lattice"})
+	}
+	for _, m := range imageModels {
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		data = append(data, map[string]any{"id": m, "object": "model", "owned_by": "lattice", "image_model": true})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"object": "list",
+		"data":   data,
+	})
+}
+
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	if !budgeter.CanAccommodate() {
+		http.Error(w, "Memory pressure high", http.StatusServiceUnavailable)
+		return
+	}
+
+	tagNames, sizes, err := ollamaTags()
+	if err != nil {
+		http.Error(w, "Ollama unhealthy", http.StatusServiceUnavailable)
+		return
 	}
 
 	caps := []string{"local", "chat", "embeddings", "tool_calling"}
@@ -1754,6 +1817,7 @@ func newRouter() *http.ServeMux {
 	mux.HandleFunc("/v1/embeddings", handleEmbeddings)
 	mux.HandleFunc("/v1/images/generations", handleImageGenerations)
 	mux.HandleFunc("/v1/images/edits", handleImageEdits)
+	mux.HandleFunc("/v1/models", handleModels)
 	mux.HandleFunc("/v1/audio/transcriptions", handleAudioTranscriptions)
 	mux.HandleFunc("/v1/audio/speech", handleAudioSpeech)
 	mux.HandleFunc("/health", handleHealth)

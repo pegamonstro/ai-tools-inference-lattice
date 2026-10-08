@@ -94,9 +94,11 @@ var telemetryPath = latticeconfig.Env("LATTICE_FRONTEND_TELEMETRY", "/var/log/la
 var capabilitiesURL = latticeconfig.Env("LATTICE_CONTROL_CAPABILITIES_URL", "http://127.0.0.1:8082/capabilities")
 
 // handleModels serves the client-facing namespace. It reports the capability
-// aliases because that is the namespace clients are expected to use, and the
-// real context ceiling because a limit the client cannot see is a limit it will
-// discover by being truncated.
+// aliases (the namespace clients are expected to use) and the real context
+// ceiling, because a limit the client cannot see is a limit it will discover by
+// being truncated. The image zoo rides the same list, marked "image_model",
+// so a probing client sees the whole menu — the image-only view stays on
+// /v1/images/models for clients that want it filtered.
 func handleModels(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(capabilitiesURL)
@@ -115,13 +117,14 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		Capabilities  []struct {
 			ID string `json:"id"`
 		} `json:"capabilities"`
+		ImageModels []string `json:"image_models"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&caps); err != nil {
 		http.Error(w, "Invalid capabilities from control plane", http.StatusInternalServerError)
 		return
 	}
 
-	data := make([]map[string]interface{}, 0, len(caps.Capabilities))
+	data := make([]map[string]interface{}, 0, len(caps.Capabilities)+len(caps.ImageModels))
 	for _, c := range caps.Capabilities {
 		data = append(data, map[string]interface{}{
 			"id":             c.ID,
@@ -129,6 +132,15 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 			"created":        time.Now().Unix(),
 			"owned_by":       "lattice",
 			"context_length": caps.ContextLength,
+		})
+	}
+	for _, id := range caps.ImageModels {
+		data = append(data, map[string]interface{}{
+			"id":          id,
+			"object":      "model",
+			"created":     time.Now().Unix(),
+			"owned_by":    "lattice",
+			"image_model": true,
 		})
 	}
 
@@ -175,10 +187,9 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 
 // handleImageModels serves the image-generation registry: every name the local
 // gateways announced as image-capable, read live from the control plane's
-// capabilities. The chat /v1/models stays capability-alias-only, so a chat
-// picker is not polluted with image names; image clients read this route
-// instead, which means the zoo can change by editing a gateway's registry
-// file — no client-side list to go stale.
+// capabilities. /v1/models carries the zoo marked "image_model"; this route is
+// the filtered view image clients read. Either way the zoo can change by
+// editing a gateway's registry file — no client-side list to go stale.
 func handleImageModels(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(capabilitiesURL)
