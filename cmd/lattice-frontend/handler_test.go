@@ -642,3 +642,25 @@ func TestRouterServesEveryClientFacingRoute(t *testing.T) {
 		}
 	}
 }
+
+// The bind list is a deploy-time decision — loopback plus tailnet on the Pi —
+// so the comma form fans out in order, the legacy addr env is honored without
+// a list, and the wildcard default is what remains when neither is set.
+func TestFrontendBindAddrs(t *testing.T) {
+	t.Setenv("LATTICE_FRONTEND_BIND", "127.0.0.1:8080, 127.0.0.2:8080,")
+	got := frontendBindAddrs()
+	if len(got) != 2 || got[0] != "127.0.0.1:8080" || got[1] != "127.0.0.2:8080" {
+		t.Fatalf("frontendBindAddrs = %v, want the list trimmed of the empty entry", got)
+	}
+
+	t.Setenv("LATTICE_FRONTEND_BIND", "")
+	t.Setenv("LATTICE_FRONTEND_ADDR", "127.0.0.1:8080")
+	if got := frontendBindAddrs(); len(got) != 1 || got[0] != "127.0.0.1:8080" {
+		t.Errorf("frontendBindAddrs = %v, want the legacy LATTICE_FRONTEND_ADDR", got)
+	}
+
+	t.Setenv("LATTICE_FRONTEND_ADDR", "")
+	if got := frontendBindAddrs(); len(got) != 1 || got[0] != ":8080" {
+		t.Errorf("frontendBindAddrs = %v, want the wildcard default", got)
+	}
+}

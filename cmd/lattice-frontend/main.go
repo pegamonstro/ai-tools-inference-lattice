@@ -360,7 +360,49 @@ func newRouter() *http.ServeMux {
 }
 
 func main() {
-	addr := latticeconfig.Env("LATTICE_FRONTEND_ADDR", ":8080")
-	fmt.Printf("Lattice Frontend listening on %s...\n", addr)
-	log.Fatal(http.ListenAndServe(addr, newRouter()))
+	for _, a := range frontendBindAddrs() {
+		go serveOn(a)
+	}
+	// Every serveOn blocks for the process's lifetime; failure inside one is
+	// fatal to the process, so main has nothing better to do than wait.
+	select {}
+}
+
+// frontendBindAddrs resolves the listeners to open. LATTICE_FRONTEND_BIND lists
+// explicit "ip:port" pairs — the frontend normally serves 127.0.0.1 for its own
+// host's clients plus its tailnet address for remote ones, which is what a
+// Pi-local agent and a remote enhance call each need. Without it the legacy
+// LATTICE_FRONTEND_ADDR semantics apply unchanged, including the wildcard
+// default. The frontend is unauthenticated; who can reach the port is
+// therefore a bind decision, not application logic.
+func frontendBindAddrs() []string {
+	if b := latticeconfig.Env("LATTICE_FRONTEND_BIND", ""); b != "" {
+		var out []string
+		for _, e := range strings.Split(b, ",") {
+			if e = strings.TrimSpace(e); e != "" {
+				out = append(out, e)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return []string{latticeconfig.Env("LATTICE_FRONTEND_ADDR", ":8080")}
+}
+
+// serveOn opens one listener and serves it for the process's lifetime. A
+// machine booting can reach here before Tailscale has raised the tailnet
+// interface, so an address that is not up yet is retried — the same race the
+// gateway's serveOn handles, and the wildcard legacy addr usually succeeds on
+// the first attempt.
+func serveOn(addr string) {
+	for {
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			fmt.Printf("Lattice Frontend listening on %s\n", addr)
+			log.Fatal(http.Serve(ln, newRouter()))
+		}
+		fmt.Printf("Lattice Frontend waiting for %s: %v (retry in 5s)\n", addr, err)
+		time.Sleep(5 * time.Second)
+	}
 }
