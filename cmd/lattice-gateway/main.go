@@ -1721,9 +1721,11 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	caps := []string{"local", "chat", "embeddings", "tool_calling"}
 	models := []string{}
+	imageModels := []string{}
 	if registry != nil {
 		caps = registry.announcedCapabilities()
 		models = registry.announcedModels(tagNames)
+		imageModels = registry.announcedImageModels()
 	}
 
 	// Recompute the concurrency ceiling from free memory and the announced model
@@ -1739,6 +1741,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		"capabilities": caps,
 		"slots":        slots,
 		"models":       models,
+		"image_models": imageModels,
 	})
 }
 

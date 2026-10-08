@@ -636,10 +636,42 @@ func TestHandleAudioForwardsWithoutARoutingEnvelope(t *testing.T) {
 
 func TestRouterServesEveryClientFacingRoute(t *testing.T) {
 	mux := newRouter()
-	for _, path := range []string{"/v1/chat/completions", "/v1/embeddings", "/v1/images/generations", "/v1/images/edits", "/v1/audio/transcriptions", "/v1/audio/speech", "/v1/models", "/health"} {
+	for _, path := range []string{"/v1/chat/completions", "/v1/embeddings", "/v1/images/generations", "/v1/images/edits", "/v1/images/models", "/v1/audio/transcriptions", "/v1/audio/speech", "/v1/models", "/health"} {
 		if _, pattern := mux.Handler(httptest.NewRequest("POST", path, nil)); pattern != path {
 			t.Errorf("%s is served as %q — an unregistered route is a 404 to the client", path, pattern)
 		}
+	}
+}
+
+// The zoo client-side consumers (Hermes list_models, the MCP server) read this
+// route; it forwards control's aggregated image registry in an OpenAI list
+// shape and refuses to invent anything when control says nothing.
+func TestHandleImageModelsListsTheRegistry(t *testing.T) {
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"image_models":["z-image-turbo","flux-dev"]}`))
+	}))
+	defer stub.Close()
+	old := capabilitiesURL
+	capabilitiesURL = stub.URL
+	defer func() { capabilitiesURL = old }()
+
+	rec := httptest.NewRecorder()
+	handleImageModels(rec, httptest.NewRequest("GET", "/v1/images/models", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if got.Object != "list" || len(got.Data) != 2 || got.Data[0].ID != "z-image-turbo" || got.Data[1].ID != "flux-dev" {
+		t.Fatalf("got %v, want the registry names in order", got)
 	}
 }
 

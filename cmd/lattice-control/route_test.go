@@ -575,3 +575,35 @@ func TestHandleCapabilitiesListsGateways(t *testing.T) {
 		t.Errorf("gateways not sorted by id: %+v", got.Gateways)
 	}
 }
+
+// The image registry is control's aggregate of what the local gateways
+// announced as image-capable: sorted, deduplicated, and empty (never null)
+// when no gateway announced any — an empty listing is what a client's
+// list_models path can consume without special cases.
+func TestHandleCapabilitiesAggregatesImageModels(t *testing.T) {
+	healthMutex.Lock()
+	gw := gateways["mac-gateway"]
+	gw.ImageModels = []string{"z-image-turbo", "flux-dev"}
+	gateways["mac-gateway"] = gw
+	defer func() {
+		healthMutex.Lock()
+		gw := gateways["mac-gateway"]
+		gw.ImageModels = nil
+		gateways["mac-gateway"] = gw
+		healthMutex.Unlock()
+	}()
+	healthMutex.Unlock()
+
+	rec := httptest.NewRecorder()
+	handleCapabilities(rec, httptest.NewRequest("GET", "/capabilities", nil))
+
+	var got struct {
+		ImageModels []string `json:"image_models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if len(got.ImageModels) != 2 || got.ImageModels[0] != "flux-dev" || got.ImageModels[1] != "z-image-turbo" {
+		t.Errorf("image_models = %v, want [flux-dev z-image-turbo]", got.ImageModels)
+	}
+}

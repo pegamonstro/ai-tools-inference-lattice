@@ -173,6 +173,48 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	proxyInference(w, r, "/v1/chat/completions", true)
 }
 
+// handleImageModels serves the image-generation registry: every name the local
+// gateways announced as image-capable, read live from the control plane's
+// capabilities. The chat /v1/models stays capability-alias-only, so a chat
+// picker is not polluted with image names; image clients read this route
+// instead, which means the zoo can change by editing a gateway's registry
+// file — no client-side list to go stale.
+func handleImageModels(w http.ResponseWriter, r *http.Request) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(capabilitiesURL)
+	if err != nil {
+		http.Error(w, "Control plane unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+
+	var caps struct {
+		ImageModels []string `json:"image_models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&caps); err != nil {
+		http.Error(w, "Invalid capabilities from control plane", http.StatusInternalServerError)
+		return
+	}
+
+	data := make([]map[string]interface{}, 0, len(caps.ImageModels))
+	for _, id := range caps.ImageModels {
+		data = append(data, map[string]interface{}{
+			"id":          id,
+			"object":      "model",
+			"owned_by":    "lattice",
+			"image_model": true,
+		})
+	}
+
+	// Explicit: Go sniffs this as text/plain without the header, and strict
+	// OpenAI clients reject that.
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"object": "list",
+		"data":   data,
+	})
+}
+
 // handleEmbeddings shares the chat flow — parse, ask control, proxy — and differs
 // in exactly two ways: the upstream path, and the absence of a routing envelope.
 // Embeddings are local-only by platform, because Ollama refuses them on its cloud
@@ -352,6 +394,7 @@ func newRouter() *http.ServeMux {
 	mux.HandleFunc("/v1/embeddings", handleEmbeddings)
 	mux.HandleFunc("/v1/images/generations", handleImageGenerations)
 	mux.HandleFunc("/v1/images/edits", handleImageEdits)
+	mux.HandleFunc("/v1/images/models", handleImageModels)
 	mux.HandleFunc("/v1/audio/transcriptions", handleAudioTranscriptions)
 	mux.HandleFunc("/v1/audio/speech", handleAudioSpeech)
 	mux.HandleFunc("/v1/models", handleModels)

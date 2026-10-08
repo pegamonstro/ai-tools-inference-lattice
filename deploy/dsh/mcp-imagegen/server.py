@@ -38,10 +38,29 @@ def _model(model: str) -> str:
     return model.strip() if model and model.strip() else DEFAULT_MODEL
 
 
-def _generate(prompt: str, size: str | None, n: int, model: str) -> list[ImageContent]:
+def _loras(loras: str) -> list[dict]:
+    """Comma-separated "name:scale" specs ("lustly:0.8, other:1.0") to the
+    gateway's [{name, scale}] array. A spec without a scale is 1.0. Empty input
+    is an empty list — absent, the gateway forwards nothing."""
+    out = []
+    for spec in (loras or "").split(","):
+        spec = spec.strip()
+        if not spec:
+            continue
+        name, _, scale = spec.partition(":")
+        try:
+            out.append({"name": name.strip(), "scale": float(scale) if scale.strip() else 1.0})
+        except ValueError:
+            continue
+    return out
+
+
+def _generate(prompt: str, size: str | None, n: int, model: str, loras: list[dict]) -> list[ImageContent]:
     body = {"model": _model(model), "prompt": prompt, "n": n, "response_format": "b64_json"}
     if size:
         body["size"] = size
+    if loras:
+        body["loras"] = loras
     req = urllib.request.Request(
         f"{FRONTEND}/v1/images/generations",
         data=json.dumps(body).encode(),
@@ -53,10 +72,12 @@ def _generate(prompt: str, size: str | None, n: int, model: str) -> list[ImageCo
     return [_image(item["b64_json"]) for item in payload["data"]]
 
 
-def _edit(image_b64: str, prompt: str, size: str | None, n: int, model: str) -> list[ImageContent]:
+def _edit(image_b64: str, prompt: str, size: str | None, n: int, model: str, loras: list[dict]) -> list[ImageContent]:
     body = {"model": _model(model), "image": image_b64, "prompt": prompt, "n": n, "response_format": "b64_json"}
     if size:
         body["size"] = size
+    if loras:
+        body["loras"] = loras
     req = urllib.request.Request(
         f"{FRONTEND}/v1/images/edits",
         data=json.dumps(body).encode(),
@@ -69,24 +90,27 @@ def _edit(image_b64: str, prompt: str, size: str | None, n: int, model: str) -> 
 
 
 @mcp.tool()
-def generate_image(prompt: str, size: str = "512x512", n: int = 1, model: str = "") -> list[ImageContent]:
+def generate_image(prompt: str, size: str = "512x512", n: int = 1, model: str = "", loras: str = "") -> list[ImageContent]:
     """Generate an image from a text prompt via Lattice's image route.
 
     size is WxH in pixels ("256x256", "512x512", "1024x1024"); smaller is much
     faster. n is the number of images. model is a registry name (e.g.
     "flux-dev", "z-image-turbo", "qwen-image-2.1", "flux-uncensored"); empty
-    uses the gateway's configured default. Returns the image(s) as PNG content.
+    uses the gateway's configured default. loras is optional, comma-separated
+    "name:scale" pairs ("lustly:0.8") naming LoRA files the target sidecar
+    knows; empty means none. Returns the image(s) as PNG content.
     """
-    return _generate(prompt, size, n, model)
+    return _generate(prompt, size, n, model, _loras(loras))
 
 
 @mcp.tool()
-def generate_image_edit(image_b64: str, prompt: str, size: str = "512x512", n: int = 1, model: str = "") -> list[ImageContent]:
+def generate_image_edit(image_b64: str, prompt: str, size: str = "512x512", n: int = 1, model: str = "", loras: str = "") -> list[ImageContent]:
     """Edit an existing image (base64) guided by a text prompt, via Lattice's image route.
 
     model is an optional registry name; empty uses the gateway's default.
+    loras is optional, comma-separated "name:scale" pairs; empty means none.
     """
-    return _edit(image_b64, prompt, size, n, model)
+    return _edit(image_b64, prompt, size, n, model, _loras(loras))
 
 
 if __name__ == "__main__":

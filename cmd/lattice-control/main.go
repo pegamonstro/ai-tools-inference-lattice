@@ -57,6 +57,7 @@ type Gateway struct {
 	Endpoint     string
 	Capabilities []string // locality ("local","tiny","cloud") + modality
 	Models       []string // concrete models served; empty = wildcard (cloud)
+	ImageModels  []string // image-generation names served; the labelled half of Models
 	Slots        int      // local concurrency ceiling (0 = not slot-limited)
 	CostPerToken float64  // cloud only
 	RateLimit    int      // cloud only, req/min
@@ -70,6 +71,11 @@ type gatewayAnnouncement struct {
 	Capabilities []string `json:"capabilities"`
 	Slots        int      `json:"slots"`
 	Models       []string `json:"models"`
+	// ImageModels are the registry names the gateway serves through an image
+	// provider. Absent on older gateways; the flat Models list is unchanged,
+	// so a gateway not yet updated announces nothing here and clients see no
+	// image names from it.
+	ImageModels []string `json:"image_models"`
 }
 
 func decodeHealth(body []byte) (gatewayAnnouncement, error) {
@@ -280,6 +286,7 @@ func monitorHealth() {
 						healthMutex.Lock()
 						g2 := gateways[id]
 						g2.Models = a.Models
+						g2.ImageModels = a.ImageModels
 						g2.Slots = a.Slots
 						g2.MaxContext = a.MaxContext
 						if len(a.Capabilities) > 0 {
@@ -798,6 +805,7 @@ func handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		Capabilities []string
 		Slots        int
 		Models       []string
+		ImageModels  []string
 		MaxContext   int
 	}
 
@@ -813,7 +821,7 @@ func handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		if ctxCap == 0 || gw.MaxContext < ctxCap {
 			ctxCap = gw.MaxContext
 		}
-		views = append(views, gwView{id, gw.Capabilities, gw.Slots, gw.Models, gw.MaxContext})
+		views = append(views, gwView{id, gw.Capabilities, gw.Slots, gw.Models, gw.ImageModels, gw.MaxContext})
 	}
 	healthMutex.RUnlock()
 	sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
@@ -844,11 +852,27 @@ func handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// The image registry, aggregated across the local gateways: every name a
+	// client may name on the images routes and have some gateway serve. Sorted
+	// and deduplicated so the listing is stable across poll cycles.
+	imgSeen := map[string]bool{}
+	imageModels := make([]string, 0)
+	for _, v := range views {
+		for _, m := range v.ImageModels {
+			if m != "" && !imgSeen[m] {
+				imgSeen[m] = true
+				imageModels = append(imageModels, m)
+			}
+		}
+	}
+	sort.Strings(imageModels)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"context_length": ctxCap,
 		"capabilities":   list,
 		"gateways":       gatewayList,
+		"image_models":   imageModels,
 	})
 }
 

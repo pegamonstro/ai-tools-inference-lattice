@@ -150,6 +150,22 @@ Measured live 2026-10-07, all three models, from the Pi frontend
 
 ## 6. Open items
 
+- **Registry visibility + LoRA access (resolved 2026-10-08).** The zoo was
+  routed but invisible: Hermes `list_models` returned only the configured
+  default, `_TUNABLES` omitted `loras`, and the MCP tools had no `loras`
+  parameter. Resolved live-source-first: the gateway's `/health` announcement
+  gains `image_models` (every `kind: mflux*` provider's registry names — the
+  registry already knew who was an image provider; now it says so), control
+  aggregates them into `/capabilities` sorted and deduplicated, and the
+  frontend serves the aggregate at `GET /v1/images/models` (OpenAI list shape,
+  `image_model: true`). The chat `/v1/models` stays capability-alias-only so a
+  chat picker is never polluted with image names. Consumers: the Hermes plugin's
+  `list_models` reads the route live (30 s cache; read failure degrades to the
+  configured default entry), the picker's `image_gen.model` choice is now
+  honored per-request as the `model` kwarg (previously ignored), and LoRAs
+  travel as the existing `loras` extension from `image_gen.mflux.loras`
+  (config-level, since the core `image_generate` schema advertises no loras
+  arg) and from the MCP tools' new optional `loras` string (`"name:scale,…"`).
 - **Hermes plugin / MCP `model` field (resolved 2026-10-08).** Both clients now
   speak OpenAI Images shape at the frontend with **registry model names**:
   - The MCP server's default model moved to `LATTICE_IMAGEGEN_MODEL` (committed

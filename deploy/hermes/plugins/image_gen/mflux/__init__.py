@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -62,11 +63,53 @@ _GEN_TIMEOUT = 3600
 # Lattice extensions the gateway forwards to the sidecar (not OpenAI fields).
 _TUNABLES = ("negative_prompt", "steps", "guidance", "seed")
 
+# The picker re-renders on every paint, so the live zoo read is cached this
+# long: fresh enough for a registry edited minutes ago at setup time, cheap
+# enough not to open a request per keystroke.
+_ZOO_TTL_S = 30
+_zoo_cache: dict = {}
+
 
 def _frontend_url() -> Optional[str]:
     cfg = load_image_gen_config("mflux")
     raw = os.environ.get("LATTICE_FRONTEND_URL") or cfg.get("url") or cfg.get("endpoint")
     return raw.strip().rstrip("/") if isinstance(raw, str) and raw.strip() else None
+
+
+def _frontend_loras() -> Optional[List[Dict[str, Any]]]:
+    """LoRAs configured for this backend (`image_gen.mflux.loras:`), in the
+    gateway's `[{name, scale}]` shape. Config-level, not per-request: the core
+    image_generate schema advertises no loras arg, so the knob is a setup-time
+    decision like the model default. Absent stays absent — a strict no-op."""
+    cfg = load_image_gen_config("mflux")
+    loras = cfg.get("loras")
+    return loras if isinstance(loras, list) and loras else None
+
+
+def _frontend_url() -> Optional[str]:
+    cfg = load_image_gen_config("mflux")
+    raw = os.environ.get("LATTICE_FRONTEND_URL") or cfg.get("url") or cfg.get("endpoint")
+    return raw.strip().rstrip("/") if isinstance(raw, str) and raw.strip() else None
+
+
+def _zoo() -> List[str]:
+    """Registry names live from the frontend's /v1/images/models. Read failures
+    are cached as empty for the TTL like successes: the picker falls back to
+    the configured default and the next read past the TTL retries."""
+    now = time.monotonic()
+    if _zoo_cache.get("at") is not None and now - _zoo_cache["at"] < _ZOO_TTL_S:
+        return _zoo_cache.get("ids") or []
+    ids: List[str] = []
+    url = _frontend_url()
+    if url:
+        try:
+            resp = requests.get(f"{url}/v1/images/models", timeout=5)
+            resp.raise_for_status()
+            ids = [m["id"] for m in (resp.json().get("data") or []) if isinstance(m, dict) and m.get("id")]
+        except Exception:  # noqa: BLE001 — any failure degrades to the fallback entry
+            ids = []
+    _zoo_cache.update(at=now, ids=ids)
+    return ids
 
 
 def _configured_model() -> Optional[str]:
@@ -118,6 +161,19 @@ class MfluxImageGenProvider(ImageGenProvider):
         return _frontend_url() is not None
 
     def list_models(self) -> List[Dict[str, Any]]:
+        # The live zoo, read from the frontend's image registry route. Falls
+        # back to the configured default when the read fails, so a picker never
+        # goes empty from a transient control-plane hiccup — one entry beats a
+        # blank menu, and the next successful read refreshes the zoo.
+        zoo = _zoo()
+        if zoo:
+            return [{
+                "id": mid,
+                "display": f"{mid} (registry name, via lattice)",
+                "speed": "~10 s on M6 (32 GB), ~2 min on M1 (16 GB)",
+                "strengths": "Text-to-image & editing, fully local, multi-model",
+                "price": "local",
+            } for mid in zoo]
         model = _configured_model() or _GATEWAY_DEFAULT_MODEL
         return [{
             "id": model,
@@ -157,12 +213,18 @@ class MfluxImageGenProvider(ImageGenProvider):
         # OpenAI Images shape, route names a registry model; the tunables ride
         # the same body as Lattice extensions the gateway forwards downstream.
         payload: Dict[str, Any] = {"prompt": prompt, "size": f"{width}x{height}", "n": 1}
-        model = _configured_model()
+        # The picker's choice reaches the provider as `model` (the core
+        # dispatcher reads image_gen.model): it wins over this backend's own
+        # default, or the pick the user made would be a silent no-op.
+        model = kwargs.get("model") or _configured_model()
         if model:
             payload["model"] = model
         for key in _TUNABLES:
             if kwargs.get(key) is not None:
                 payload[key] = kwargs[key]
+        loras = _frontend_loras()
+        if loras:
+            payload["loras"] = loras
 
         is_edit = bool(image_url)
         if is_edit:

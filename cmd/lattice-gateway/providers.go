@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -220,6 +221,30 @@ func (reg *providerRegistry) announcedModels(ollamaTags []string) []string {
 			out = append(out, m)
 		}
 	}
+	return out
+}
+
+// announcedImageModels is the image half of the /health announcement: every
+// registry name served through an image provider (kind "mflux" — the family
+// includes mflux-zimage and mflux-qwen siblings). It rides the announcement
+// beside the flat Models list so a client asking "what can I generate with"
+// gets the zoo instead of guessing which of the announced names is an image
+// model. Sorted so the announced list does not depend on config order.
+func (reg *providerRegistry) announcedImageModels() []string {
+	seen := map[string]bool{}
+	var out []string
+	for pn, kind := range reg.providerKinds {
+		if !strings.HasPrefix(kind, "mflux") {
+			continue
+		}
+		for _, m := range reg.served[pn] {
+			if m != "" && !seen[m] {
+				seen[m] = true
+				out = append(out, m)
+			}
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 

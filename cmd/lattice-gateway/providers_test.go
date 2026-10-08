@@ -139,6 +139,24 @@ func TestAnnouncedModelsFlattensAndDropsCloudTags(t *testing.T) {
 	}
 }
 
+// The image half of the announcement: only mflux-family providers, sorted, and
+// not polluted by chat tags — the labelled list clients consume instead of
+// guessing among the flat models.
+func TestAnnouncedImageModelsKeepsImageProvidersOnly(t *testing.T) {
+	reg := &providerRegistry{
+		served: map[string][]string{
+			"mflux":       {"flux-dev"},
+			"mflux-zimage": {"z-image-turbo"},
+			"ollama":       nil,
+		},
+		providerKinds: map[string]string{"mflux": "mflux", "mflux-zimage": "mflux", "ollama": "ollama"},
+	}
+	got := reg.announcedImageModels()
+	if len(got) != 2 || got[0] != "flux-dev" || got[1] != "z-image-turbo" {
+		t.Fatalf("announcedImageModels = %v, want [flux-dev z-image-turbo]", got)
+	}
+}
+
 func TestLoadProvidersRegistersMfluxAndAnnouncesImageGeneration(t *testing.T) {
 	cfg := `{
 		"default_provider": "ollama",
