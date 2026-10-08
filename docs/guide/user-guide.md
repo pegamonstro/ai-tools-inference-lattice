@@ -26,7 +26,8 @@ There is **one** entry point (the frontend). You never talk to the control
 plane or the gateway directly in normal use.
 
 You can check what is available before you call: `GET /v1/models` lists the
-aliases and the context ceiling, and `GET /health` reports liveness.
+aliases, the literal model ids actually served, the image models, and the
+context ceiling, and `GET /health` reports liveness.
 
 ---
 
@@ -57,7 +58,8 @@ with a real Ollama model id rather than a Lattice alias.
 > empty model field. The name you sent is the name telemetry shows — so the
 > failure is never anonymous.
 
-To see the aliases and the context ceiling, call `GET /v1/models`.
+To see the aliases, every literal id the local gateways serve (chat, speech,
+embedding), the image models, and the context ceiling, call `GET /v1/models`.
 
 ---
 

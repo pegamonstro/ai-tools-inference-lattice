@@ -98,7 +98,9 @@ var capabilitiesURL = latticeconfig.Env("LATTICE_CONTROL_CAPABILITIES_URL", "htt
 // ceiling, because a limit the client cannot see is a limit it will discover by
 // being truncated. The image zoo rides the same list, marked "image_model",
 // so a probing client sees the whole menu — the image-only view stays on
-// /v1/images/models for clients that want it filtered.
+// /v1/images/models for clients that want it filtered. The concrete
+// chat/speech names ride it too, unmarked: they are valid /route model names,
+// exactly like the aliases.
 func handleModels(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(capabilitiesURL)
@@ -118,13 +120,14 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 			ID string `json:"id"`
 		} `json:"capabilities"`
 		ImageModels []string `json:"image_models"`
+		Models      []string `json:"models"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&caps); err != nil {
 		http.Error(w, "Invalid capabilities from control plane", http.StatusInternalServerError)
 		return
 	}
 
-	data := make([]map[string]interface{}, 0, len(caps.Capabilities)+len(caps.ImageModels))
+	data := make([]map[string]interface{}, 0, len(caps.Capabilities)+len(caps.ImageModels)+len(caps.Models))
 	for _, c := range caps.Capabilities {
 		data = append(data, map[string]interface{}{
 			"id":             c.ID,
@@ -141,6 +144,15 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 			"created":     time.Now().Unix(),
 			"owned_by":    "lattice",
 			"image_model": true,
+		})
+	}
+	for _, id := range caps.Models {
+		data = append(data, map[string]interface{}{
+			"id":             id,
+			"object":         "model",
+			"created":        time.Now().Unix(),
+			"owned_by":       "lattice",
+			"context_length": caps.ContextLength,
 		})
 	}
 

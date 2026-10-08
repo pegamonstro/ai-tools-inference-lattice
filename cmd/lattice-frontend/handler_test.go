@@ -281,7 +281,7 @@ func TestHandleModelsListsTheCapabilityNamespace(t *testing.T) {
 			t.Errorf("frontend asked control for %q", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"context_length":65536,"capabilities":[{"id":"local-brain","local":"granite4:3b","cloud":"gemma4:31b-cloud"}],"image_models":["flux-uncensored","z-image-turbo"]}`))
+		w.Write([]byte(`{"context_length":65536,"capabilities":[{"id":"local-brain","local":"granite4:3b","cloud":"gemma4:31b-cloud"}],"models":["granite4:3b","kokoro-82m"],"image_models":["flux-uncensored","z-image-turbo"]}`))
 	}))
 	defer control.Close()
 
@@ -311,7 +311,7 @@ func TestHandleModelsListsTheCapabilityNamespace(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("response is not OpenAI list JSON: %v", err)
 	}
-	if got.Object != "list" || len(got.Data) != 3 {
+	if got.Object != "list" || len(got.Data) != 5 {
 		t.Fatalf("unexpected model list: %+v", got)
 	}
 	if got.Data[0].ID != "local-brain" || got.Data[0].ImageModel {
@@ -326,6 +326,20 @@ func TestHandleModelsListsTheCapabilityNamespace(t *testing.T) {
 		}
 		if !got.Data[1+idx].ImageModel {
 			t.Errorf("data[%d] (%s) image_model = false, want the zoo marked image_model", 1+idx, id)
+		}
+	}
+	// The concrete chat/speech names ride the same list, unmarked: they are
+	// valid model names on /route, exactly like the aliases.
+	for idx, id := range []string{"granite4:3b", "kokoro-82m"} {
+		entry := got.Data[3+idx]
+		if entry.ID != id {
+			t.Errorf("data[%d].id = %q, want %q", 3+idx, entry.ID, id)
+		}
+		if entry.ImageModel {
+			t.Errorf("data[%d] (%s) is a chat model, want no image_model flag", 3+idx, id)
+		}
+		if entry.ContextLength != 65536 {
+			t.Errorf("data[%d].context_length = %d, want the gateway's real ceiling", 3+idx, entry.ContextLength)
 		}
 	}
 }

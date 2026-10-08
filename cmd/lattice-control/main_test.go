@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func TestDecodeHealth(t *testing.T) {
 	body := []byte(`{"status":"ok","max_context":32768,"capabilities":["local","chat"],"slots":1,"models":["granite3-moe:3b"]}`)
@@ -78,5 +83,83 @@ func TestSelectGatewayCloudPicksCheapest(t *testing.T) {
 	}
 	if g.ID != "secondary" {
 		t.Fatalf("expected cheapest (secondary), got %s", g.ID)
+	}
+}
+
+func TestCapabilitiesListsConcreteModels(t *testing.T) {
+	origCaps := capabilities
+	origGateways := gateways
+	t.Cleanup(func() { capabilities = origCaps; gateways = origGateways })
+
+	capabilities = map[string]struct {
+		local string
+		cloud string
+	}{
+		"local-brain": {local: "gemma4:12b", cloud: "gemma4:31b-cloud"},
+		"local-coder": {local: "qwen2.5-coder:3b", cloud: "deepseek-v4-pro:cloud"},
+	}
+	gateways = map[string]Gateway{
+		"remote-gpu": {
+			ID: "remote-gpu", Endpoint: "http://remote:8081",
+			Capabilities: []string{"local", "chat", "image_generation", "speech"},
+			Models:       []string{"gemma4:12b", "qwen3.8:27b", "whisper-small", "z-image-turbo", "sdxl-base"},
+			ImageModels:  []string{"z-image-turbo", "sdxl-base"},
+			Slots:        1, MaxContext: 262144,
+		},
+		"local": {
+			ID: "local", Endpoint: "http://127.0.0.1:8081",
+			Capabilities: []string{"local", "chat"},
+			Models:       []string{"gemma4:12b", "bge-m3:latest"},
+			Slots:        1, MaxContext: 131072,
+		},
+	}
+
+	w := httptest.NewRecorder()
+	handleCapabilities(w, httptest.NewRequest(http.MethodGet, "/capabilities", nil))
+
+	var body struct {
+		Capabilities []struct {
+			ID string `json:"id"`
+		} `json:"capabilities"`
+		ImageModels []string `json:"image_models"`
+		Models      []string `json:"models"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode capabilities response: %v", err)
+	}
+
+	// Concrete names aggregate across gateways (gemma4 on both), keep the
+	// speech + embedding entries, and come out deduplicated and sorted.
+	want := []string{"bge-m3:latest", "gemma4:12b", "qwen3.8:27b", "whisper-small"}
+	if len(body.Models) != len(want) {
+		t.Fatalf("models = %v, want %v", body.Models, want)
+	}
+	for i := range want {
+		if body.Models[i] != want[i] {
+			t.Fatalf("models = %v, want %v", body.Models, want)
+		}
+	}
+
+	// Names the client already has other listings for stay out: the aliases and
+	// the image zoo (they would double-list on the same screen).
+	for _, name := range body.Models {
+		if name == "local-brain" {
+			t.Fatal("alias id leaked into the concrete models list")
+		}
+		if name == "z-image-turbo" || name == "sdxl-base" {
+			t.Fatalf("image model %s leaked into the concrete models list", name)
+		}
+	}
+	if len(body.ImageModels) != 2 {
+		t.Fatalf("image_models = %v, want the 2 image names", body.ImageModels)
+	}
+	foundAlias := false
+	for _, c := range body.Capabilities {
+		if c.ID == "local-brain" {
+			foundAlias = true
+		}
+	}
+	if !foundAlias {
+		t.Fatal("capabilities list lost the aliases")
 	}
 }

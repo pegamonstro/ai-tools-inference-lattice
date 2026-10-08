@@ -101,7 +101,12 @@ Two read-only endpoints, served by the frontend:
   each with a `context_length` reflecting the real ceiling (§3.5), plus the
   aggregated image registry entries, marked `"image_model": true` (extended
   2026-10-08: a probing client reads one list — a chat-only menu made the image
-  zoo invisible; the filtered view stays on `/v1/images/models`). This is the
+  zoo invisible; the filtered view stays on `/v1/images/models`), plus the
+  concrete chat/speech/embedding names aggregated across the local gateways
+  (added 2026-10-08: a literal model id is a valid `model` value on
+  `/route`, so the menu advertises the id space, not only the aliases —
+  aliases and image names are excluded from the concrete list to avoid
+  double-listing). This is the
   namespace clients are *expected* to use, so it is the namespace it advertises.
 - **`GET /health`** — frontend liveness. Cheap, and the natural probe target.
 

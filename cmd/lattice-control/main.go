@@ -867,12 +867,33 @@ func handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(imageModels)
 
+	// The concrete chat/speech/embedding names, aggregated the same way: every
+	// non-image model served across the local gateways that a client may name
+	// on /route directly. Alias ids and image names already appear elsewhere in
+	// this payload, so they are excluded here.
+	aliasSeen := map[string]bool{}
+	for _, id := range ids {
+		aliasSeen[id] = true
+	}
+	modelSeen := map[string]bool{}
+	concrete := make([]string, 0)
+	for _, v := range views {
+		for _, m := range v.Models {
+			if m != "" && !aliasSeen[m] && !imgSeen[m] && !modelSeen[m] {
+				modelSeen[m] = true
+				concrete = append(concrete, m)
+			}
+		}
+	}
+	sort.Strings(concrete)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"context_length": ctxCap,
 		"capabilities":   list,
 		"gateways":       gatewayList,
 		"image_models":   imageModels,
+		"models":         concrete,
 	})
 }
 
