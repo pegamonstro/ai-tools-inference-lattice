@@ -786,9 +786,10 @@ func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, e
 
 	// The client's tool loop branches on finish_reason; a tool-call answer must
 	// never end as "stop", or the agent ends its turn. Otherwise Ollama's
-	// done_reason decides, so a budget-truncated reply stays distinguishable
-	// from a complete one.
-	finish := ollamaFinishReason(native.DoneReason, len(toolCalls) > 0)
+	// done_reason decides, with eval_count vs the num_predict we sent as a
+	// fallback signal when Ollama mislabels a budget clamp as "stop", so a
+	// budget-truncated reply stays distinguishable from a complete one.
+	finish := finishReasonFromUpstream(native.DoneReason, native.EvalCount, maxTokens, len(toolCalls) > 0)
 
 	return &Response{
 		ID:      "chatcmpl-" + req.Routing.RequestID,
@@ -963,9 +964,11 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 	// thinking interleaved into the reply.
 	assembled := content.String()
 	// A tool-call answer must never end as "stop", or the client's loop ends
-	// its turn; otherwise the terminal event's done_reason decides, so a reply
-	// cut off by the output budget keeps finish_reason "length".
-	finish := ollamaFinishReason(doneReason, len(toolCalls) > 0)
+	// its turn; otherwise the terminal event's done_reason decides, with the
+	// terminal eval_count vs the num_predict we sent as a fallback signal when
+	// Ollama mislabels a budget clamp as "stop", so a reply cut off by the
+	// output budget keeps finish_reason "length".
+	finish := finishReasonFromUpstream(doneReason, completionTokens, maxTokens, len(toolCalls) > 0)
 	if len(toolCalls) == 0 && strings.TrimSpace(assembled) == "" {
 		if fallback := ollamaContent("", thinking.String(), reasoning.String()); fallback != "" {
 			writeSSEChunk(w, id, created, model, fallback, "")
@@ -1138,15 +1141,29 @@ func headerPriority(r *http.Request) int {
 	return priorityFor(r.Header.Get("X-Priority"))
 }
 
-// ollamaFinishReason maps Ollama's done_reason to the OpenAI finish_reason.
-// "length" must survive as "length": a client that only ever sees "stop"
-// cannot tell a budget-truncated answer from a complete one. Anything else
-// (including an absent/unknown reason) is a normal stop.
-func ollamaFinishReason(doneReason string, hasToolCalls bool) string {
+// finishReasonFromUpstream maps the provider's own done/finish reason to the
+// OpenAI finish_reason the client sees, and otherwise infers truncation from the
+// output budget.
+//
+// A tool call always wins, so the client's tool loop branches instead of ending
+// its turn. A literal "length" (or "tool_calls") reason always survives. Beyond
+// that, providers are unreliable about reporting truncation: Ollama has been
+// observed answering done_reason "stop" even when generation actually stopped at
+// the num_predict cap, and an OpenAI-compatible server can do the same. Because
+// we sent maxTokens as the cap, a reply that generated at least that many tokens
+// was clamped by it, so it is reported as "length" too. Anything else (including
+// an absent/unknown reason) is a normal stop.
+func finishReasonFromUpstream(reason string, generated, maxTokens int, hasToolCalls bool) string {
 	if hasToolCalls {
 		return "tool_calls"
 	}
-	if strings.EqualFold(strings.TrimSpace(doneReason), "length") {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length":
+		return "length"
+	case "tool_calls":
+		return "tool_calls"
+	}
+	if maxTokens > 0 && generated >= maxTokens {
 		return "length"
 	}
 	return "stop"
