@@ -146,7 +146,7 @@ func TestAnnouncedModelsFlattensAndDropsCloudTags(t *testing.T) {
 func TestAnnouncedImageModelsKeepsImageProvidersOnly(t *testing.T) {
 	reg := &providerRegistry{
 		served: map[string][]string{
-			"mflux":       {"flux-dev"},
+			"mflux":        {"flux-dev"},
 			"mflux-zimage": {"z-image-turbo"},
 			"ollama":       nil,
 		},

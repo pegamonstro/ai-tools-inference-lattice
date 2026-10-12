@@ -210,7 +210,7 @@ func TestAgingWeight(t *testing.T) {
 }
 
 func TestPrioritySemaphoreAging(t *testing.T) {
-	s := newPrioritySemaphore(1, 5.0) // 5 priority points/sec so aging wins fast
+	s := newPrioritySemaphore(1, 5.0)  // 5 priority points/sec so aging wins fast
 	s.acquire(context.Background(), 1) // hold the single slot
 
 	done := make(chan int, 2)

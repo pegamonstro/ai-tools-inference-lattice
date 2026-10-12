@@ -31,9 +31,13 @@ type Routing struct {
 }
 
 type Request struct {
-	Model      string        `json:"model"`
-	Messages   []interface{} `json:"messages"`
-	Stream     bool          `json:"stream"`
+	Model    string        `json:"model"`
+	Messages []interface{} `json:"messages"`
+	Stream   bool          `json:"stream"`
+	// MaxTokens is the client's top-level output cap. It is a pointer so an
+	// absent field is distinguishable from an explicit 0, which is not a
+	// usable cap and must fall through to the default.
+	MaxTokens  *int          `json:"max_tokens,omitempty"`
 	Tools      []interface{} `json:"tools,omitempty"`
 	ToolChoice interface{}   `json:"tool_choice,omitempty"`
 	Routing    Routing       `json:"routing"`
@@ -757,8 +761,9 @@ func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, e
 				} `json:"function"`
 			} `json:"tool_calls"`
 		} `json:"message"`
-		PromptEvalCount int `json:"prompt_eval_count"`
-		EvalCount       int `json:"eval_count"`
+		PromptEvalCount int    `json:"prompt_eval_count"`
+		EvalCount       int    `json:"eval_count"`
+		DoneReason      string `json:"done_reason"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&native); err != nil {
 		return nil, err
@@ -779,12 +784,11 @@ func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, e
 		})
 	}
 
-	finish := "stop"
-	if len(toolCalls) > 0 {
-		// The client's tool loop branches on this; "stop" with tool_calls
-		// present makes an agent end its turn instead of calling the tool.
-		finish = "tool_calls"
-	}
+	// The client's tool loop branches on finish_reason; a tool-call answer must
+	// never end as "stop", or the agent ends its turn. Otherwise Ollama's
+	// done_reason decides, so a budget-truncated reply stays distinguishable
+	// from a complete one.
+	finish := ollamaFinishReason(native.DoneReason, len(toolCalls) > 0)
 
 	return &Response{
 		ID:      "chatcmpl-" + req.Routing.RequestID,
@@ -871,6 +875,7 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 	created := time.Now().Unix()
 	model := req.Model
 	promptTokens, completionTokens := 0, 0
+	doneReason := ""
 	var content, thinking, reasoning strings.Builder
 	toolCalls := make([]ToolCall, 0)
 
@@ -896,9 +901,10 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 					} `json:"function"`
 				} `json:"tool_calls"`
 			} `json:"message"`
-			PromptEvalCount int  `json:"prompt_eval_count"`
-			EvalCount       int  `json:"eval_count"`
-			Done            bool `json:"done"`
+			PromptEvalCount int    `json:"prompt_eval_count"`
+			EvalCount       int    `json:"eval_count"`
+			Done            bool   `json:"done"`
+			DoneReason      string `json:"done_reason"`
 		}
 		if err := json.Unmarshal(line, &ev); err != nil {
 			continue
@@ -940,6 +946,7 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 		if ev.Done {
 			// Token counts only arrive with the terminal event in streaming mode.
 			promptTokens, completionTokens = ev.PromptEvalCount, ev.EvalCount
+			doneReason = ev.DoneReason
 			break
 		}
 		if flusher != nil && ev.Message.Content != "" {
@@ -955,12 +962,11 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 	// now, at the end, so a model that also streamed real content never has its
 	// thinking interleaved into the reply.
 	assembled := content.String()
-	finish := "stop"
-	if len(toolCalls) > 0 {
-		// The client's tool loop branches on finish_reason; a tool-call
-		// answer must never end as "stop", or the agent ends its turn.
-		finish = "tool_calls"
-	} else if strings.TrimSpace(assembled) == "" {
+	// A tool-call answer must never end as "stop", or the client's loop ends
+	// its turn; otherwise the terminal event's done_reason decides, so a reply
+	// cut off by the output budget keeps finish_reason "length".
+	finish := ollamaFinishReason(doneReason, len(toolCalls) > 0)
+	if len(toolCalls) == 0 && strings.TrimSpace(assembled) == "" {
 		if fallback := ollamaContent("", thinking.String(), reasoning.String()); fallback != "" {
 			writeSSEChunk(w, id, created, model, fallback, "")
 			assembled = fallback
@@ -1132,14 +1138,52 @@ func headerPriority(r *http.Request) int {
 	return priorityFor(r.Header.Get("X-Priority"))
 }
 
-// resolveMaxTokens caps output length via the max_budget provider param
-// (default 4096). Shared by Execute and the telemetry path so both agree.
-func resolveMaxTokens(req Request) int {
-	maxTokens := 4096
-	if mb, ok := req.Routing.ProviderParams["max_budget"].(float64); ok {
-		maxTokens = int(mb)
+// ollamaFinishReason maps Ollama's done_reason to the OpenAI finish_reason.
+// "length" must survive as "length": a client that only ever sees "stop"
+// cannot tell a budget-truncated answer from a complete one. Anything else
+// (including an absent/unknown reason) is a normal stop.
+func ollamaFinishReason(doneReason string, hasToolCalls bool) string {
+	if hasToolCalls {
+		return "tool_calls"
 	}
-	return maxTokens
+	if strings.EqualFold(strings.TrimSpace(doneReason), "length") {
+		return "length"
+	}
+	return "stop"
+}
+
+// resolveMaxTokens caps output length. Precedence is the max_budget provider
+// param (routing.provider_params["max_budget"]), then the client's top-level
+// max_tokens when it is a positive value, then the 4096 default. A non-positive
+// client max_tokens is ignored rather than becoming the cap. Shared by Execute
+// and the telemetry path so both agree.
+func resolveMaxTokens(req Request) int {
+	if n, ok := maxBudgetValue(req.Routing.ProviderParams["max_budget"]); ok {
+		return n
+	}
+	if req.MaxTokens != nil && *req.MaxTokens > 0 {
+		return *req.MaxTokens
+	}
+	return 4096
+}
+
+// maxBudgetValue reads routing.provider_params["max_budget"], which normally
+// decodes as float64 but may already be an int or a json.Number when a caller
+// built the Routing by hand or decoded with UseNumber.
+func maxBudgetValue(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return int(i), true
+		}
+	}
+	return 0, false
 }
 
 // contextWindow sizes the Ollama context to the prompt: it starts at 2048 and
