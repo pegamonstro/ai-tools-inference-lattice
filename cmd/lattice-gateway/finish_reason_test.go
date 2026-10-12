@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -317,5 +319,288 @@ func TestClientMaxTokensDecodesAndBecomesTheCap(t *testing.T) {
 	}
 	if got := resolveMaxTokens(absent); got != 4096 {
 		t.Errorf("resolveMaxTokens = %d, want 4096", got)
+	}
+}
+
+// --- budget-clamp inference ---------------------------------------------------
+//
+// The live regression: Ollama answered done_reason "stop" even though generation
+// stopped at the num_predict we sent, so finish_reason never reached the client
+// as "length". The budget itself is therefore the second truncation signal: a
+// reply that generated at least the cap we sent is a clamp, whatever the
+// provider calls it.
+
+// ollamaClampMock answers a unary /api/chat with eval_count = num_predict + delta
+// and the given done_reason, and hands back the num_predict it observed so the
+// test can assert the cap was actually sent.
+func ollamaClampMock(t *testing.T, doneReason string, delta int) (*OllamaProvider, <-chan int) {
+	t.Helper()
+	predictCh := make(chan int, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var sent struct {
+			Options map[string]interface{} `json:"options"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+			t.Errorf("decode ollama request: %v", err)
+		}
+		predict := 0
+		if v, ok := sent.Options["num_predict"].(float64); ok {
+			predict = int(v)
+		}
+		predictCh <- predict
+
+		resp := map[string]interface{}{
+			"model":             "m",
+			"message":           map[string]interface{}{"role": "assistant", "content": "cut"},
+			"prompt_eval_count": 1,
+			"eval_count":        predict + delta,
+		}
+		if doneReason != "" {
+			resp["done_reason"] = doneReason
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(srv.Close)
+	return &OllamaProvider{Endpoint: srv.URL}, predictCh
+}
+
+// ollamaStreamClampMock is the streaming twin: a content event then a terminal
+// event whose eval_count is num_predict + delta and whose done_reason is given.
+func ollamaStreamClampMock(t *testing.T, doneReason string, delta int) *OllamaProvider {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var sent struct {
+			Options map[string]interface{} `json:"options"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&sent)
+		predict := 0
+		if v, ok := sent.Options["num_predict"].(float64); ok {
+			predict = int(v)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		enc := json.NewEncoder(w)
+		_ = enc.Encode(map[string]interface{}{
+			"model":   "granite4:3b",
+			"message": map[string]interface{}{"role": "assistant", "content": "cut"},
+			"done":    false,
+		})
+		term := map[string]interface{}{
+			"model":             "granite4:3b",
+			"message":           map[string]interface{}{"role": "assistant", "content": ""},
+			"done":              true,
+			"prompt_eval_count": 1,
+			"eval_count":        predict + delta,
+		}
+		if doneReason != "" {
+			term["done_reason"] = doneReason
+		}
+		_ = enc.Encode(term)
+	}))
+	t.Cleanup(srv.Close)
+	return &OllamaProvider{Endpoint: srv.URL}
+}
+
+func TestUnaryBudgetClampInferredAsLength(t *testing.T) {
+	cases := []struct {
+		name       string
+		doneReason string
+		delta      int
+		want       string
+	}{
+		{name: "stop at the cap is length", doneReason: "stop", delta: 0, want: "length"},
+		{name: "absent at the cap is length", doneReason: "", delta: 0, want: "length"},
+		{name: "unknown reason at the cap is length", doneReason: "load", delta: 0, want: "length"},
+		{name: "stop below the cap stays stop", doneReason: "stop", delta: -5, want: "stop"},
+		{name: "absent below the cap stays stop", doneReason: "", delta: -5, want: "stop"},
+		{name: "explicit length below the cap stays length", doneReason: "length", delta: -5, want: "length"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, predictCh := ollamaClampMock(t, tc.doneReason, tc.delta)
+			res, err := p.Execute(context.Background(), Request{
+				Model:    "m",
+				Messages: []interface{}{map[string]interface{}{"role": "user", "content": "go"}},
+				Routing:  Routing{ProviderParams: map[string]interface{}{"max_budget": float64(8)}},
+			})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if predict := <-predictCh; predict != 8 {
+				t.Fatalf("num_predict sent = %d, want 8", predict)
+			}
+			if got := res.Choices[0].FinishReason; got != tc.want {
+				t.Errorf("finish_reason = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A tool call still beats an inferred budget clamp: the client's tool loop must
+// branch rather than the turn ending on a truncation heuristic.
+func TestToolCallsBeatInferredLength(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"model": "m",
+			"message": map[string]interface{}{
+				"role":    "assistant",
+				"content": "",
+				"tool_calls": []interface{}{map[string]interface{}{
+					"function": map[string]interface{}{"name": "get_weather", "arguments": map[string]interface{}{"city": "Paris"}},
+				}},
+			},
+			"done_reason":       "stop",
+			"prompt_eval_count": 1,
+			"eval_count":        8,
+		})
+	}))
+	defer srv.Close()
+
+	p := &OllamaProvider{Endpoint: srv.URL}
+	res, err := p.Execute(context.Background(), Request{
+		Model:    "m",
+		Messages: []interface{}{map[string]interface{}{"role": "user", "content": "go"}},
+		Routing:  Routing{ProviderParams: map[string]interface{}{"max_budget": float64(8)}},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got := res.Choices[0].FinishReason; got != "tool_calls" {
+		t.Errorf("finish_reason = %q, want tool_calls", got)
+	}
+}
+
+func TestStreamingBudgetClampInferredAsLength(t *testing.T) {
+	cases := []struct {
+		name       string
+		doneReason string
+		delta      int
+		want       string
+	}{
+		{name: "stop at the cap is length", doneReason: "stop", delta: 0, want: "length"},
+		{name: "absent at the cap is length", doneReason: "", delta: 0, want: "length"},
+		{name: "stop below the cap stays stop", doneReason: "stop", delta: -5, want: "stop"},
+		{name: "absent below the cap stays stop", doneReason: "", delta: -5, want: "stop"},
+		{name: "explicit length below the cap stays length", doneReason: "length", delta: -5, want: "length"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := ollamaStreamClampMock(t, tc.doneReason, tc.delta)
+			rec := httptest.NewRecorder()
+			res, committed, err := p.ExecuteStream(context.Background(), Request{
+				Model:    "granite4:3b",
+				Messages: []interface{}{map[string]interface{}{"role": "user", "content": "go"}},
+				Routing:  Routing{ProviderParams: map[string]interface{}{"max_budget": float64(8)}},
+			}, rec)
+			if err != nil {
+				t.Fatalf("ExecuteStream: %v", err)
+			}
+			if !committed {
+				t.Fatal("stream was not committed")
+			}
+			if reasons := terminalFinishReasons(t, rec.Body.String()); len(reasons) != 1 || reasons[0] != tc.want {
+				t.Errorf("terminal finish_reasons = %v, want [%s]", reasons, tc.want)
+			}
+			if got := res.Choices[0].FinishReason; got != tc.want {
+				t.Errorf("assembled finish_reason = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// --- MLX / OpenAI-compatible provider -----------------------------------------
+
+// MLX stream used to hardcode "stop" on the terminal frame and the assembled
+// Response. The upstream finish_reason must now survive, and a "stop" the server
+// put on a reply that consumed the whole max_tokens cap must infer as "length".
+func TestMLXStreamFinishReasonComesFromUpstreamOrCap(t *testing.T) {
+	cases := []struct {
+		name       string
+		upstream   string
+		completion int
+		want       string
+	}{
+		{name: "upstream length survives", upstream: "length", completion: 2, want: "length"},
+		{name: "upstream stop at the cap is length", upstream: "stop", completion: 8, want: "length"},
+		{name: "upstream stop below the cap is stop", upstream: "stop", completion: 2, want: "stop"},
+		{name: "upstream tool_calls survives", upstream: "tool_calls", completion: 2, want: "tool_calls"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				io.WriteString(w, `data: {"id":"x","model":"mlx","choices":[{"index":0,"delta":{"content":"cut"},"finish_reason":null}]}`+"\n\n")
+				io.WriteString(w, `data: {"id":"x","model":"mlx","choices":[{"index":0,"delta":{},"finish_reason":"`+tc.upstream+`"}],"usage":{"prompt_tokens":1,"completion_tokens":`+strconv.Itoa(tc.completion)+`,"total_tokens":9}}`+"\n\n")
+				io.WriteString(w, "data: [DONE]\n\n")
+			}))
+			defer srv.Close()
+
+			p := &MLXProvider{Endpoint: srv.URL}
+			rec := httptest.NewRecorder()
+			res, committed, err := p.ExecuteStream(context.Background(), Request{
+				Model:    "mlx",
+				Messages: []interface{}{map[string]interface{}{"role": "user", "content": "go"}},
+				Routing:  Routing{ProviderParams: map[string]interface{}{"max_budget": float64(8)}},
+			}, rec)
+			if err != nil {
+				t.Fatalf("ExecuteStream: %v", err)
+			}
+			if !committed {
+				t.Fatal("stream was not committed")
+			}
+			if reasons := terminalFinishReasons(t, rec.Body.String()); len(reasons) != 1 || reasons[0] != tc.want {
+				t.Errorf("terminal finish_reasons = %v, want [%s]", reasons, tc.want)
+			}
+			if got := res.Choices[0].FinishReason; got != tc.want {
+				t.Errorf("assembled finish_reason = %q, want %q", got, tc.want)
+			}
+			if got := res.Choices[0].Message.Content; got != "cut" {
+				t.Errorf("assembled content = %q, want cut", got)
+			}
+		})
+	}
+}
+
+// The MLX unary path decodes the upstream OpenAI Response directly; it must not
+// turn a clamped reply into a clean "stop" either.
+func TestMLXUnaryFinishReasonFromUpstreamOrCap(t *testing.T) {
+	cases := []struct {
+		name       string
+		upstream   string
+		completion int
+		want       string
+	}{
+		{name: "upstream length survives", upstream: "length", completion: 2, want: "length"},
+		{name: "upstream stop at the cap is length", upstream: "stop", completion: 8, want: "length"},
+		{name: "upstream stop below the cap is stop", upstream: "stop", completion: 2, want: "stop"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":      "x",
+					"object":  "chat.completion",
+					"model":   "mlx",
+					"choices": []interface{}{map[string]interface{}{"index": 0, "message": map[string]interface{}{"role": "assistant", "content": "cut"}, "finish_reason": tc.upstream}},
+					"usage":   map[string]interface{}{"prompt_tokens": 1, "completion_tokens": tc.completion, "total_tokens": 9},
+				})
+			}))
+			defer srv.Close()
+
+			p := &MLXProvider{Endpoint: srv.URL}
+			res, err := p.Execute(context.Background(), Request{
+				Model:    "mlx",
+				Messages: []interface{}{map[string]interface{}{"role": "user", "content": "go"}},
+				Routing:  Routing{ProviderParams: map[string]interface{}{"max_budget": float64(8)}},
+			})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if got := res.Choices[0].FinishReason; got != tc.want {
+				t.Errorf("finish_reason = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

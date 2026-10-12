@@ -281,11 +281,12 @@ func (p *MLXProvider) httpTransport() *http.Transport {
 func (p *MLXProvider) Execute(ctx context.Context, req Request) (*Response, error) {
 	targetURL, _ := url.Parse(p.Endpoint + "/v1/chat/completions")
 
+	maxTokens := resolveMaxTokens(req)
 	body := map[string]interface{}{
 		"model":      req.Model,
 		"messages":   req.Messages,
 		"stream":     false,
-		"max_tokens": resolveMaxTokens(req),
+		"max_tokens": maxTokens,
 	}
 	b, _ := json.Marshal(body)
 
@@ -307,6 +308,17 @@ func (p *MLXProvider) Execute(ctx context.Context, req Request) (*Response, erro
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
 	}
+	// Same client contract as Ollama: the upstream finish_reason is honoured, but
+	// when the server labels a reply clamped by max_tokens as "stop" the token
+	// count vs the cap we sent still surfaces it as "length".
+	if len(out.Choices) > 0 {
+		out.Choices[0].FinishReason = finishReasonFromUpstream(
+			out.Choices[0].FinishReason,
+			out.Usage.CompletionTokens,
+			maxTokens,
+			len(out.Choices[0].Message.ToolCalls) > 0,
+		)
+	}
 	return &out, nil
 }
 
@@ -317,11 +329,12 @@ func (p *MLXProvider) Execute(ctx context.Context, req Request) (*Response, erro
 func (p *MLXProvider) ExecuteStream(ctx context.Context, req Request, w http.ResponseWriter) (*Response, bool, error) {
 	targetURL, _ := url.Parse(p.Endpoint + "/v1/chat/completions")
 
+	maxTokens := resolveMaxTokens(req)
 	body := map[string]interface{}{
 		"model":      req.Model,
 		"messages":   req.Messages,
 		"stream":     true,
-		"max_tokens": resolveMaxTokens(req),
+		"max_tokens": maxTokens,
 		"stream_options": map[string]interface{}{
 			"include_usage": true,
 		},
@@ -354,6 +367,7 @@ func (p *MLXProvider) ExecuteStream(ctx context.Context, req Request, w http.Res
 	created := time.Now().Unix()
 	model := req.Model
 	promptTokens, completionTokens := 0, 0
+	upstreamFinish := ""
 	var content strings.Builder
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -375,6 +389,9 @@ func (p *MLXProvider) ExecuteStream(ctx context.Context, req Request, w http.Res
 				Delta struct {
 					Content string `json:"content"`
 				} `json:"delta"`
+				// The terminal chunk carries the upstream finish_reason with an
+				// empty delta, so it must be read before the empty-delta skip.
+				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage *Usage `json:"usage"`
 		}
@@ -393,6 +410,9 @@ func (p *MLXProvider) ExecuteStream(ctx context.Context, req Request, w http.Res
 		if len(ev.Choices) == 0 {
 			continue
 		}
+		if fr := strings.TrimSpace(ev.Choices[0].FinishReason); fr != "" {
+			upstreamFinish = fr
+		}
 		delta := ev.Choices[0].Delta.Content
 		if delta == "" {
 			continue
@@ -407,7 +427,11 @@ func (p *MLXProvider) ExecuteStream(ctx context.Context, req Request, w http.Res
 		return nil, true, err
 	}
 
-	writeSSEChunk(w, id, created, model, "", "stop")
+	// The upstream finish_reason is honoured; a truncated reply the server
+	// mislabels as "stop" is still inferred as "length" from the token count
+	// against the max_tokens cap we sent, matching the Ollama contract.
+	finish := finishReasonFromUpstream(upstreamFinish, completionTokens, maxTokens, false)
+	writeSSEChunk(w, id, created, model, "", finish)
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	if flusher != nil {
 		flusher.Flush()
@@ -421,7 +445,7 @@ func (p *MLXProvider) ExecuteStream(ctx context.Context, req Request, w http.Res
 		Choices: []Choice{{
 			Index:        0,
 			Message:      Message{Role: "assistant", Content: content.String()},
-			FinishReason: "stop",
+			FinishReason: finish,
 		}},
 		Usage: Usage{
 			PromptTokens:     promptTokens,
