@@ -22,15 +22,30 @@ Design notes:
     We pass img-gen's resolved absolute ``.safetensors`` paths through verbatim
     and always set ``--lora-model-dir`` (the ckpt dir) so extraction activates.
     Missing LoRA files are a non-fatal warning in sd.cpp (tag removed).
+  * Conditioning: ``control_net`` and ``ip_adapter`` map to sd.cpp's
+    ``--control-net``/``--control-image``/``--control-strength`` and
+    ``--ip-adapter``/``--ip-adapter-image``/``--ip-adapter-strength`` (+ its
+    required ``--clip_vision`` encoder). Model files are resolved from the ckpt
+    dir by convention; a missing model file is a 400 naming the expected path —
+    a silently ignored conditioning request would look like an unconstrained
+    generation, which is the worst way to fail. net=canny additionally gets
+    ``--image-preprocess target=control,canny=true`` (the contract promises
+    sidecar-side edge extraction; callers send a photo, not an edge map). With
+    no conditioning keys present the command is identical to pre-extension.
 
 Endpoints:
-  GET  /health  -> {status, bin, default_model, ckpt_dir}
+  GET  /health  -> {status, bin, default_model, ckpt_dir, control_dir,
+                    ip_adapter, clip_vision}
   GET  /status  -> {state: "idle"} | {state: "running", id, step, total, elapsed, cancelled}
 
   POST /generate -> {prompt, negative_prompt?, width?, height?, steps?,
-                     guidance?, seed?, model?, loras?}
+                     guidance?, seed?, model?, loras?,
+                     control_net?: {net: pose|depth|canny, image: b64,
+                                    strength? 0.1..1.0},  # absent/0 -> 0.7
+                     ip_adapter?: {image: b64, strength? 0.1..1.0}}  # absent/0 -> 0.6
                     -> {image: b64, seed, width, height, seconds} | {error}
   POST /edit     -> same as /generate plus {init_image: b64, strength?}
+                   (no conditioning keys — control/ip-adapter are generate-mode)
 
   GET  /result/<id> -> the finished generation's PNG (raw bytes, "image/png"),
                       404 when unknown — same re-attach semantics as mflux.
@@ -56,6 +71,11 @@ CKPT_DIR = os.environ.get("SD_CKPT_DIR", os.path.expanduser("~/mflux-models/sdxl
 # absent, SD_DEFAULT_MODEL (or the lexicographically first ckpt in SD_CKPT_DIR) runs.
 DEFAULT_MODEL = os.environ.get("SD_EXTRA_DEFAULT_MODEL", "")
 LORA_MODEL_DIR = os.environ.get("SD_LORA_MODEL_DIR", CKPT_DIR)
+# Conditioning models, resolved per request: net -> <CONTROL_MODEL_DIR>/<net>.safetensors;
+# IP-Adapter takes its model + the clip-vision image encoder it requires.
+CONTROL_MODEL_DIR = os.environ.get("SD_CONTROL_MODEL_DIR", os.path.join(CKPT_DIR, "control"))
+IPADAPTER_PATH = os.environ.get("SD_IPADAPTER_PATH", os.path.join(CKPT_DIR, "ip-adapter.safetensors"))
+CLIP_VISION_PATH = os.environ.get("SD_CLIP_VISION_PATH", os.path.join(CKPT_DIR, "clip_vision", "model.safetensors"))
 EXTRA = os.environ.get("SD_EXTRA_ARGS", "").split()
 BIND = os.environ.get("SD_BIND", "127.0.0.1")
 PORT = int(os.environ.get("SD_PORT", "8902"))
@@ -175,6 +195,64 @@ def _resolve_model(params: dict) -> str:
     return model
 
 
+# Conditioning contract (img-gen storage.ControlParams/IPAdapterParams): net
+# names the map kind; image is base64; strength absent or 0 falls back to the
+# sidecar default (0.7 control / 0.6 ip-adapter), 0.1..1.0 passes through.
+CONTROL_NETS = ("pose", "depth", "canny")
+DEFAULT_CONTROL_STRENGTH = 0.7
+DEFAULT_IPADAPTER_STRENGTH = 0.6
+
+
+def _strength(value, default: float) -> float:
+    if value is None:
+        return default
+    s = float(value)
+    if s == 0:
+        return default
+    if not 0.1 <= s <= 1.0:
+        raise ValueError(f"strength must be 0 (sidecar default) or 0.1..1.0, got {s}")
+    return s
+
+
+def _b64_image(value, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} is required (base64)")
+    try:
+        base64.b64decode(value, validate=True)
+    except Exception as exc:
+        raise ValueError(f"{label} is not valid base64") from exc
+    return value
+
+
+def _control_ref(ctrl) -> dict:
+    if not isinstance(ctrl, dict):
+        raise ValueError("control_net must be an object")
+    net = ctrl.get("net")
+    if net not in CONTROL_NETS:
+        raise ValueError(f"control_net.net must be one of {'/'.join(CONTROL_NETS)}, got {net!r}")
+    path = os.path.join(CONTROL_MODEL_DIR, net + ".safetensors")
+    if not os.path.isfile(path):
+        raise ValueError(f"no controlnet model for net {net!r}: expected file {path} (set SD_CONTROL_MODEL_DIR to override)")
+    return {
+        "net": net,
+        "image": _b64_image(ctrl.get("image"), "control_net.image"),
+        "strength": _strength(ctrl.get("strength"), DEFAULT_CONTROL_STRENGTH),
+    }
+
+
+def _ip_adapter_ref(ipa) -> dict:
+    if not isinstance(ipa, dict):
+        raise ValueError("ip_adapter must be an object")
+    if not os.path.isfile(IPADAPTER_PATH):
+        raise ValueError(f"no ip-adapter model: expected file {IPADAPTER_PATH} (set SD_IPADAPTER_PATH to override)")
+    if not os.path.isfile(CLIP_VISION_PATH):
+        raise ValueError(f"no clip-vision encoder: expected file {CLIP_VISION_PATH} (set SD_CLIP_VISION_PATH to override)")
+    return {
+        "image": _b64_image(ipa.get("image"), "ip_adapter.image"),
+        "strength": _strength(ipa.get("strength"), DEFAULT_IPADAPTER_STRENGTH),
+    }
+
+
 def run_generation(params: dict, state: dict) -> bytes:
     """Run one sd-cli invocation (txt2img, or img2img with init_image); the binary
     writes the PNG straight to the persisted results path."""
@@ -204,6 +282,29 @@ def run_generation(params: dict, state: dict) -> bytes:
             with open(init, "wb") as fh:
                 fh.write(base64.b64decode(params["init_image"]))
             cmd += ["--init-img", init, "--strength", str(params.get("strength", 0.4))]
+        ctrl = params.get("control_net")
+        if ctrl:
+            ctl = os.path.join(td, "control.png")
+            with open(ctl, "wb") as fh:
+                fh.write(base64.b64decode(ctrl["image"]))
+            cmd += [
+                "--control-net", os.path.join(CONTROL_MODEL_DIR, ctrl["net"] + ".safetensors"),
+                "--control-image", ctl,
+                "--control-strength", str(ctrl["strength"]),
+            ]
+            if ctrl["net"] == "canny":
+                cmd += ["--image-preprocess", "target=control,canny=true"]
+        ipa = params.get("ip_adapter")
+        if ipa:
+            ref = os.path.join(td, "ip_adapter.png")
+            with open(ref, "wb") as fh:
+                fh.write(base64.b64decode(ipa["image"]))
+            cmd += [
+                "--ip-adapter", IPADAPTER_PATH,
+                "--clip_vision", CLIP_VISION_PATH,
+                "--ip-adapter-image", ref,
+                "--ip-adapter-strength", str(ipa["strength"]),
+            ]
 
         return _exec(cmd, out, state)
 
@@ -227,6 +328,9 @@ class Handler(BaseHTTPRequestHandler):
                 "bin": os.path.exists(BIN),
                 "default_model": DEFAULT_MODEL or None,
                 "ckpt_dir": CKPT_DIR,
+                "control_dir": CONTROL_MODEL_DIR,
+                "ip_adapter": IPADAPTER_PATH,
+                "clip_vision": CLIP_VISION_PATH,
             })
         elif self.path.rstrip("/") == "/status":
             with _cur_lock:
@@ -286,8 +390,9 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             params = self._build_params(path, body)
-        except (ValueError, TypeError):
-            self._send_json(400, {"error": "width/height/steps/guidance/seed/strength must be numeric and image inputs present", "error_type": "invalid_argument"}); return
+        except (ValueError, TypeError) as exc:
+            msg = str(exc) or "width/height/steps/guidance/seed/strength must be numeric and image inputs present"
+            self._send_json(400, {"error": msg, "error_type": "invalid_argument"}); return
 
         if not _lock.acquire(blocking=False):
             self._send_json(409, {"error": "generation already in progress", "error_type": "busy"}); return
@@ -359,6 +464,10 @@ class Handler(BaseHTTPRequestHandler):
             "model": body.get("model"),
             "loras": body.get("loras"),
         }
+        if control_net := body.get("control_net"):
+            common["control_net"] = _control_ref(control_net)
+        if ip_adapter := body.get("ip_adapter"):
+            common["ip_adapter"] = _ip_adapter_ref(ip_adapter)
         if path == "/edit":
             if not body.get("init_image"):
                 raise TypeError("init_image required")

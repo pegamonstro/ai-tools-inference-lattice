@@ -581,6 +581,28 @@ func (p *MfluxProvider) oneImage(ctx context.Context, req ImageRequest, op strin
 	if op == "edit" {
 		body["init_image"] = req.Image
 	}
+	// Conditioning rides the generate op only: img-gen validates it as a
+	// generate-mode field, and the sidecar's edit path takes no control maps.
+	// Relayed as top-level keys (not the client's "extension" wrapper) because
+	// that is the shape deploy/sd-sidecar.py and direct mode both speak. Nil
+	// pointers skip their keys entirely, so mflux and unconditioned SDXL
+	// requests keep the exact pre-extension body.
+	if req.Extension != nil && op == "generate" {
+		if req.Extension.Control != nil {
+			cn := map[string]interface{}{"net": req.Extension.Control.Net, "image": req.Extension.Control.Image}
+			if req.Extension.Control.Strength != nil {
+				cn["strength"] = *req.Extension.Control.Strength
+			}
+			body["control_net"] = cn
+		}
+		if req.Extension.IPAdapter != nil {
+			ia := map[string]interface{}{"image": req.Extension.IPAdapter.Image}
+			if req.Extension.IPAdapter.Strength != nil {
+				ia["strength"] = *req.Extension.IPAdapter.Strength
+			}
+			body["ip_adapter"] = ia
+		}
+	}
 	b, err := json.Marshal(body)
 	if err != nil {
 		return ImageDataItem{}, err

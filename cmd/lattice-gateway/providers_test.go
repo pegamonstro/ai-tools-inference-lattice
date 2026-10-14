@@ -349,3 +349,124 @@ func TestMfluxProviderEditRejectsMask(t *testing.T) {
 		t.Errorf("sidecar called %d times, want 0 — the mask must be rejected before any request", calls)
 	}
 }
+
+func TestImageRequestDecodesConditioningExtension(t *testing.T) {
+	// The exact wire shape img-gen's Phase B client sends: conditioning
+	// wrapped under "extension", strengths optional. This is the decode that
+	// previously swallowed the field wholesale — a missing tag here is the
+	// original silent-drop bug coming back.
+	raw := `{"model":"sdxl-illustrious","prompt":"a cat",
+	          "extension":{"control":{"net":"pose","image":"Yw==","strength":0.5},
+	                       "ip_adapter":{"image":"aQ=="}}}`
+	var img ImageRequest
+	if err := json.Unmarshal([]byte(raw), &img); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if img.Extension == nil || img.Extension.Control == nil || img.Extension.IPAdapter == nil {
+		t.Fatalf("extension not decoded: %+v", img.Extension)
+	}
+	c := img.Extension.Control
+	if c.Net != "pose" || c.Image != "Yw==" || c.Strength == nil || *c.Strength != 0.5 {
+		t.Errorf("control = %+v", c)
+	}
+	ia := img.Extension.IPAdapter
+	if ia.Image != "aQ==" || ia.Strength != nil {
+		t.Errorf("ip_adapter = %+v, want image decoded and strength absent", ia)
+	}
+}
+
+func TestMfluxProviderRelaysConditioningToTheSidecar(t *testing.T) {
+	// The relay contract: the client's "extension" wrapper becomes top-level
+	// control_net/ip_adapter on the sidecar body — the shape the sidecar and
+	// direct mode both speak. The wrapper itself must not leak through.
+	var sawBody map[string]interface{}
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&sawBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"image":"aW1hZ2U=","seed":1,"width":512,"height":512,"seconds":1.0}`))
+	}))
+	defer sidecar.Close()
+
+	half, full := 0.5, 0.8
+	p := &MfluxProvider{Endpoint: sidecar.URL}
+	_, err := p.GenerateImage(context.Background(), ImageRequest{
+		Prompt: "a cat", Size: "512x512",
+		Extension: &ImageExtension{
+			Control:   &ImageControl{Net: "depth", Image: "Yw==", Strength: &half},
+			IPAdapter: &ImageIPAdapter{Image: "aQ==", Strength: &full},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GenerateImage: %v", err)
+	}
+	if _, leaks := sawBody["extension"]; leaks {
+		t.Errorf("the client's extension wrapper leaked to the sidecar: %v", sawBody)
+	}
+	cn, ok := sawBody["control_net"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("control_net missing from sidecar body: %v", sawBody)
+	}
+	if cn["net"] != "depth" || cn["image"] != "Yw==" || cn["strength"] != float64(0.5) {
+		t.Errorf("control_net relay = %v", cn)
+	}
+	ia, ok := sawBody["ip_adapter"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("ip_adapter missing from sidecar body: %v", sawBody)
+	}
+	if ia["image"] != "aQ==" || ia["strength"] != float64(0.8) {
+		t.Errorf("ip_adapter relay = %v", ia)
+	}
+}
+
+func TestMfluxProviderConditioningOmitsAbsentStrengthAndEdit(t *testing.T) {
+	// Absent pointers must stay absent — an omitted strength selects the
+	// sidecar's 0.7/0.6 defaults, and a forwarded "0" would defeat that, and a
+	// nil reference must not mint an empty key. Edit requests never take
+	// conditioning, so even a present Extension stays off the edit body: an
+	// mflux sidecar must never see a new key it has no contract for.
+	var sawBody map[string]interface{}
+	sawPath := ""
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawPath = r.URL.Path
+		// A fresh map per request: json.Decode merges into a non-nil map, and
+		// a merged generate body would masquerade as edit leakage.
+		b := map[string]interface{}{}
+		json.NewDecoder(r.Body).Decode(&b)
+		sawBody = b
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"image":"aW1hZ2U=","seed":1,"width":512,"height":512,"seconds":1.0}`))
+	}))
+	defer sidecar.Close()
+
+	p := &MfluxProvider{Endpoint: sidecar.URL}
+	req := ImageRequest{Prompt: "a cat", Size: "512x512",
+		Extension: &ImageExtension{
+			Control: &ImageControl{Net: "pose", Image: "Yw=="},
+		},
+	}
+	if _, err := p.GenerateImage(context.Background(), req); err != nil {
+		t.Fatalf("GenerateImage: %v", err)
+	}
+	cn, _ := sawBody["control_net"].(map[string]interface{})
+	if cn["net"] != "pose" || cn["image"] != "Yw==" {
+		t.Errorf("control_net relay = %v", cn)
+	}
+	if _, has := cn["strength"]; has {
+		t.Errorf("control_net.strength forwarded despite absent pointer: %v", cn)
+	}
+	if _, has := sawBody["ip_adapter"]; has {
+		t.Errorf("ip_adapter present with nil reference: %v", sawBody)
+	}
+
+	if _, err := p.EditImage(context.Background(), req); err != nil {
+		t.Fatalf("EditImage: %v", err)
+	}
+	if sawPath != "/edit" {
+		t.Fatalf("path = %q, want /edit", sawPath)
+	}
+	for _, key := range []string{"control_net", "ip_adapter", "extension"} {
+		if _, has := sawBody[key]; has {
+			t.Errorf("edit body carries %q — conditioning is generate-mode only: %v", key, sawBody)
+		}
+	}
+}
