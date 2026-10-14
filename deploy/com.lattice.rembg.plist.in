@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lattice rembg sidecar — macOS LaunchAgent template.
+
+  The U²-Net subject-extraction backend for img-gen's transparent: "rembg"
+  compose flag. Runs on the Mac (the MLX-adjacent ML host) behind REMBG_URL.
+
+  Unlike the ESRGAN sidecar (stdlib-only, shells out to a CLI), rembg needs
+  onnxruntime + Pillow in-process, so REMBG_PYTHON is a uv venv interpreter
+  (rembg-venv/bin/python under the deploy root, rembg[cpu] installed).
+  The u2netp weights (~5 MB) auto-download from the rembg releases on first
+  segmentation; the sidecar keeps the session resident after that.
+
+  REMBG_BIND must be 0.0.0.0 so img-gen (on another host) can reach it over the
+  tailnet; the sidecar is unauthenticated, matching the mflux/esrgan posture.
+  Port 8903 (8900 speech, 8901 esrgan, 8902 sdxl).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lattice.rembg</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REMBG_PYTHON__</string>
+        <string>__REPO_ROOT__/deploy/rembg-sidecar.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>REMBG_BIND</key>
+        <string>0.0.0.0</string>
+        <key>REMBG_PORT</key>
+        <string>8903</string>
+        <key>REMBG_MODEL</key>
+        <string>u2netp</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/lattice-rembg.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/lattice-rembg.err.log</string>
+</dict>
+</plist>
