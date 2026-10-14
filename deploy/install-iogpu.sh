@@ -7,17 +7,19 @@
 # because install-macos.sh runs without sudo.
 #
 #   sudo ./deploy/install-iogpu.sh
-#   sudo IOGPU_WIRED_LIMIT_MB=24576 ./deploy/install-iogpu.sh   # conservative override
+#   sudo IOGPU_WIRED_LIMIT_MB=28672 ./deploy/install-iogpu.sh   # raise, GPU-only box
 #
-# 28672 MiB (28 GiB) on a 32 GiB host leaves ~4 GiB for the OS and non-GPU processes.
-# Lower it (e.g. 24576 = 24 GiB) if you see memory-pressure instability under load.
+# 24576 MiB (24 GiB) on a 32 GiB host leaves ~8 GiB for the OS and non-GPU processes
+# (a resident ollama llama-server alone is ~15 GiB). Raise it only if nothing else
+# holds RAM on the box; the default was 28672, which OOM'd mid-render with a resident
+# text model.
 set -euo pipefail
 
 LABEL="com.lattice.iogpu"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEMPLATE="$REPO_ROOT/deploy/$LABEL.plist.in"
 DEST="/Library/LaunchDaemons/$LABEL.plist"
-WIRED_LIMIT_MB="${IOGPU_WIRED_LIMIT_MB:-28672}"
+WIRED_LIMIT_MB="${IOGPU_WIRED_LIMIT_MB:-24576}"
 
 if [[ $EUID -ne 0 ]]; then
   echo "error: installs a LaunchDaemon and sets a system sysctl — run with sudo." >&2
