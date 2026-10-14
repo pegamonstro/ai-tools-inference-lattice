@@ -428,3 +428,64 @@ the live config — it had drifted (stale mlx provider, `qwen2.5-coder:3b`,
 - **Announcements** (`/v1/models`) reflect the pins: all six names listed with the
   gateway default `max_context` 32768; the per-model `context` overrides remain
   serving-side ceilings (round 5 mechanism, unchanged).
+
+## Small-model battery for the gate Mac — chat, tools, coding (round 8)
+
+Goal: find small Ollama models that are actually useful on the gate Mac for the
+agents' real workload — chat + tool-calling through the lattice (Hermes/DSH
+shape) plus a coding battery — and establish which resident models are dead
+weight. The 30b+ tier (rounds 1–5) is measured-slow and ~55 GB of blobs; this
+round prices the 3–4b class and the compact coder against the same gates.
+
+Protocol: `num_ctx 2048`, `stream=false`, warm decode = `eval_count /
+eval_duration` on the second identical call, `size_vram` from `/api/ps`, swap
+delta from `vm.swapusage` around a cold load + full battery; every value from a
+second, clean pass of `deploy/round8-battery.sh` with `"think": false` — without
+it the qwen3-family thinking phase burns the whole `num_predict` budget and
+returns empty text (both `/api/generate` and the gateway's tool call keep the
+think text in `content`, which an OpenAI-shape client will also see). The tool
+gate ran through the full chain (frontend → control → gateway → Ollama) with a
+`get_weather` schema and scored on a **valid `tool_calls` array with the right
+argument key** — the hard requirement, since that is what Hermes/DSH consume.
+Loads happened right after pulls on a warm page cache, so the load column is a
+relative figure, not a worst-case disk number. Swap delta was 0 for every model
+on every phase (baseline residue ~1.2 GB untouched, invariant 7 held).
+
+| model | size_vram | cold load | warm decode | swap Δ | chat | tool native | tool gateway | coding (x/3) | verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| `granite4:3b` | 2.33 GB | 1.05 s | **64.4 tok/s** | 0 | ✓ | ✓ | **✓** | 3/3 | **register on M6** |
+| `llama3.2:3b` | 2.31 GB | 1.07 s | **69.5 tok/s** | 0 | ✓ | ✓ | **✓** | 2/3 | **register on M6** |
+| `qwen3.5:4b` | 3.11 GB | 0.81 s | **44.8 tok/s** | 0 | ✓ | ✓ | **✓** | 2/3 | **register on M6** |
+| `qwen3:4b` | 2.87 GB | 1.06 s | 55.4 tok/s | 0 | ✓ (self-narrating) | ✓ (think text in content) | ✓ (think text in content) | 1/3 | reject |
+| `qwen3.5:latest` (8b-class) | 6.13 GB | 1.83 s | 24.4 tok/s | 0 | ✓ | ✓ | ✓ | 2/3 | reject |
+| `qwen2.5-coder:7b` | 4.62 GB | 1.31 s | 32.4 tok/s | 0 | ✓ | content-JSON only | content-JSON only | 3/3 | reject |
+| `granite3-moe:3b` | 2.21 GB | 0.78 s | 203.8 tok/s | 0 | ✓ | schema echo | content-JSON only | 1/3 | reject |
+| `gemma3:4b` | 2.89 GB | 1.59 s | 55.0 tok/s | 0 | ✓ | **400 — no tools support** | 400 relayed | 3/3 | reject |
+
+Coding battery: (1) fix the off-by-one `items[i+1]` loop, (2) write
+`is_palindrome` ignoring case/non-alphanumeric, (3) guard the panicking Go slice
+`s[1:len(s)-1]`. Scored from full responses, not summaries.
+
+- **Tool-calling through the gateway is the gate that matters and three models
+  clear it cleanly.** `granite4:3b`, `llama3.2:3b` and `qwen3.5:4b` return
+  `tool_calls` with `finish_reason:"tool_calls"` and the right `location`
+  argument through the full chain. The gateway translates Ollama's native shape
+  faithfully; upstream errors relay verbatim (`ollama returned status 400`).
+- **The qwen3-family thinking leak is real but not disqualifying by itself** —
+  even with `think:false` on the generate path, the chat-tools path keeps the
+  assistant's scratch text in `content` alongside valid `tool_calls`. Clients
+  that render `content` will show it; `qwen3:4b` is rejected here on the coding
+  battery (it burns `num_predict` planning and wrote no code in two of three
+  cases), not on the leak.
+- **Decode-rate outliers are believable but not a reason to keep a broken model.**
+  `granite3-moe:3b` decoded at 203.8 tok/s and still fails both tool gates and
+  the coding battery. `qwen3.5:latest` lands at 24.4 tok/s — under the ~25
+  tok/s floor, and its 4b sibling covers the same family at 44.8.
+- **`qwen2.5-coder:7b` is the cautionary tale for coder models as agents:** the
+  best coding score of the round (3/3) with zero tool support — it puts the tool
+  JSON in plain `content`. Fine as a completion engine, useless as a tool-calling
+  chat backend.
+- **Verdict:** register `granite4:3b`, `llama3.2:3b`, `qwen3.5:4b` on M6;
+  the five rejects (plus the 30b+ tier from earlier rounds) become Workstream B's
+  first offsite payloads — see `docs/manual/model-repo-runbook.md` and
+  `docs/specs/lattice-model-repo.md`.

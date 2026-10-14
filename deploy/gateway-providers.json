@@ -18,6 +18,9 @@
     { "name": "gemma4:26b", "provider": "ollama", "context": 131072 },
     { "name": "gemma4:31b", "provider": "ollama", "context": 65536 },
     { "name": "qwen3.8:27b", "provider": "ollama", "context": 65536 },
+    { "name": "granite4:3b", "provider": "ollama", "context": 16384 },
+    { "name": "llama3.2:3b", "provider": "ollama", "context": 16384 },
+    { "name": "qwen3.5:4b", "provider": "ollama", "context": 16384 },
     { "name": "huihui_ai/dolphin3-abliterated:latest", "provider": "ollama" },
     { "name": "huihui_ai/qwen2.5-vl-abliterated:7b", "provider": "ollama" },
     { "name": "bge-m3:latest", "provider": "ollama" }
