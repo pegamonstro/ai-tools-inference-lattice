@@ -30,6 +30,8 @@ func TestHandleImageGenerationsReturnsAnImage(t *testing.T) {
 	// to the 10 GiB default, which would make this test depend on the machine's
 	// real free memory. 1 MiB is below any host's free memory, so the check passes.
 	t.Setenv("LATTICE_GATEWAY_IMAGE_MARGIN_MB", "1")
+	// Wired gate off: the request must not depend on this host's iogpu sysctl.
+	t.Setenv("LATTICE_GATEWAY_WIRED_LIMIT_MB", "0")
 
 	oldBudgeter, oldProviders, oldRegistry := budgeter, providers, registry
 	budgeter = &MemoryBudgeter{safeMargin: 0, pageSize: 4096}

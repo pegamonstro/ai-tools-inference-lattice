@@ -94,6 +94,9 @@ source. Defaults are shown; override in each process's environment (see §5).
 | `LATTICE_GATEWAY_OLLAMA_TIMEOUT` | `20m` | Go duration bounding one call to Ollama (see §3.1) |
 | `LATTICE_GATEWAY_PROVIDERS` | *(unset)* | path to a JSON file naming the providers and model→provider routes (see §3.2) |
 | `LATTICE_GATEWAY_TELEMETRY` | `telemetry-gateway.jsonl` | gateway's local event buffer sink (CWD-relative) |
+| `LATTICE_GATEWAY_WIRED_LIMIT_MB` | *(unset)* | wired-budget ceiling in MiB for image renders (see §3.3); unset reads the host's `iogpu.wired_limit_mb` once, `0` disables the gate |
+| `LATTICE_GATEWAY_WIRED_GAP_MB` | `2048` | MiB held between the counted residency and the wired limit (see §3.3) |
+| `LATTICE_GATEWAY_PROVIDER_QUEUE` | `2` | same-provider render queue depth before `429 provider_queue_full`; unset, invalid, or `<1` keeps the default |
 
 #### 3.1 The inference timeout
 
@@ -186,6 +189,42 @@ set of local model ids: every model routed in the config, plus every local
 model Ollama reports via `/api/tags`, with `:cloud` aliases dropped. The single
 local inference slot still serialises *all* local models, Ollama and MLX alike
 — one resident model at a time, unchanged.
+
+#### 3.3 The wired budget and the SDXL warmer
+
+Image renders are cold-start CLI children (mflux, sd.cpp) that pin unified
+memory alongside Ollama's resident llama-servers. The gateway counts both and
+refuses a render the budget cannot hold (see §7):
+
+- **Residency poll.** Every 5 seconds the gateway reads Ollama's `/api/ps`
+  and sums the resident models' `size_vram`. A failed poll keeps the last
+  figure — staleness only ever over-counts, never under-protects.
+- **Render booking.** Each image render books an estimated footprint for its
+  in-flight window: the model file's size, plus the conditioning files a
+  generate request with control / IP-Adapter references. A model path that
+  cannot be sized (missing file, or a directory-valued model) falls back to
+  8 GiB.
+- **The gate.** A render is admitted only when residency plus booked renders
+  plus its footprint plus the gap (`LATTICE_GATEWAY_WIRED_GAP_MB`, default
+  2048) stays inside the limit from §3's table. Refused renders get
+  `429 wired_budget_exhausted`; a same-provider render beyond one running
+  and `LATTICE_GATEWAY_PROVIDER_QUEUE` further requests get
+  `429 provider_queue_full`. This is accounting, not reservation — numbers
+  are floors with a gap for headroom — and on hosts without an iogpu sysctl
+  the gate is off (the ledger still counts, so `/metrics` stays
+  informative).
+
+The env-unset ceiling is read from the same sysctl
+`deploy/install-iogpu.sh`'s LaunchDaemon maintains; raising wired memory on
+the host raises the budget with it.
+
+Separately, the SDXL sidecar (`deploy/sd-sidecar.py`) keeps the last render's
+weights warm: after a successful render it re-reads the used files every 30
+seconds until `SD_WARM_KEEP_S` (default 300, `0` disables) elapses, skipping
+while a render is active. The reads are plain page-cache reads — never
+mlock — so the files stay evictable and cannot collide with resident models;
+the next cold sd-cli start on the same checkpoint reads its weights from RAM
+instead of disk.
 
 ---
 

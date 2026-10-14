@@ -41,6 +41,22 @@
         -->
         <key>LATTICE_GATEWAY_BIND</key>
         <string>__GATEWAY_BIND__</string>
+        <!--
+          Wired-budget gate (wired.go): LATTICE_GATEWAY_WIRED_LIMIT_MB unset
+          means "read iogpu.wired_limit_mb once at first use" — the value the
+          deploy/install-iogpu.sh LaunchDaemon maintains. Set it here only to
+          override that host sysctl (0 disables the gate).
+        -->
+        <key>LATTICE_GATEWAY_WIRED_GAP_MB</key>
+        <string>2048</string>
+        <key>LATTICE_GATEWAY_PROVIDER_QUEUE</key>
+        <string>2</string>
+        <!--
+          When the sd sidecar's conditioning dirs move off their defaults,
+          mirror them here so imageFootprint() sizes the same files the
+          sidecar loads: SD_CKPT_DIR / SD_CONTROL_MODEL_DIR / SD_IPADAPTER_PATH /
+          SD_CLIP_VISION_PATH.
+        -->
     </dict>
 
     <key>RunAtLoad</key>

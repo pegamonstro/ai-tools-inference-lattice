@@ -551,6 +551,14 @@ func (s *prioritySemaphore) waiting() int {
 	return len(s.waiters)
 }
 
+// usedValue is the count of holders, the live-state complement to limitValue()
+// for metrics.
+func (s *prioritySemaphore) usedValue() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.used
+}
+
 // effPriority is the aging-adjusted precedence; lower wins.
 func (s *prioritySemaphore) effPriority(w waiter) float64 {
 	return float64(w.priority) - s.aging*time.Since(w.enqueued).Seconds()
@@ -1309,7 +1317,49 @@ var (
 	// announces unbounded concurrency. Overridden in main() from
 	// LATTICE_GATEWAY_MAX_SLOTS.
 	maxSlots = 3
+
+	// renderSlots serializes image renders per provider: each render sidecar is
+	// a cold-Popen CLI (sd-cli or mflux-generate) that loads its checkpoint per
+	// child, so two concurrent children on one engine would contend for the
+	// same model load and VRAM. Every provider gets limit 1; LATTICE_GATEWAY_PROVIDER_QUEUE
+	// bounds the same-provider queue depth before 429s start.
+	renderSlotsMu sync.Mutex
+	renderSlots   = map[string]*prioritySemaphore{}
+
+	// providerQueueMax is the waiters-per-provider ceiling; overridden in main()
+	// from LATTICE_GATEWAY_PROVIDER_QUEUE via resolveProviderQueue.
+	providerQueueMax = 2
 )
+
+// renderSlotFor returns the per-provider semaphore, creating it lazily —
+// providers are known only after config load, and the map is written once per
+// provider for the process's lifetime.
+func renderSlotFor(providerName string) *prioritySemaphore {
+	renderSlotsMu.Lock()
+	defer renderSlotsMu.Unlock()
+	if s, ok := renderSlots[providerName]; ok {
+		return s
+	}
+	s := newPrioritySemaphore(1, agingWeight())
+	s.setMaxQueue(providerQueueMax)
+	renderSlots[providerName] = s
+	return s
+}
+
+// resolveProviderQueue maps an LATTICE_GATEWAY_PROVIDER_QUEUE value onto a
+// queue depth. Unset, invalid, and <1 all hold the default 2: the knob is a
+// backpressure limiter, and an operator typo must widen the queue.
+func resolveProviderQueue(v string) int {
+	const d = 2
+	if v == "" {
+		return d
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return d
+	}
+	return n
+}
 
 // logQueuedCancel records a request whose client went away while it waited for
 // the inference slot. Nothing was sent to Ollama, so there is no status left to
@@ -1649,6 +1699,39 @@ func handleImage(w http.ResponseWriter, r *http.Request, op string) {
 		return
 	}
 
+	// Serialize per provider (one render child per engine), then refuse the
+	// render if booking its footprint against the host's wired budget would
+	// overrun the limit with ollama's current residency counted. The provider
+	// slot is acquired while already holding a global one, so a waiter can
+	// never starve a holder: the holder always holds the global it needs to
+	// finish. Client cancellations unwind both via r.Context().
+	slot := renderSlotFor(providerName)
+	granted, err = slot.acquire(r.Context(), headerPriority(r))
+	if err == errQueueFull {
+		w.Header().Set("Retry-After", "5")
+		logTelemetry(Telemetry{RequestID: requestID, Model: img.Model, Elapsed: time.Since(t0).Seconds(), Error: "provider_queue_full"}, caller)
+		http.Error(w, "Provider render queue full; retry later", http.StatusTooManyRequests)
+		return
+	}
+	if !granted {
+		logTelemetry(Telemetry{
+			RequestID: requestID,
+			Model:     img.Model,
+			Elapsed:   time.Since(t0).Seconds(),
+			Error:     "client_cancelled_while_queued",
+		}, caller)
+		return
+	}
+	defer slot.release()
+
+	footprint := imageFootprint(op, img)
+	if !imageWiredLedger.tryEnter(footprint) {
+		logTelemetry(Telemetry{RequestID: requestID, Model: img.Model, Elapsed: time.Since(t0).Seconds(), Error: "wired_budget_exhausted"}, caller)
+		http.Error(w, "GPU wired budget exhausted with resident models; retry shortly", http.StatusTooManyRequests)
+		return
+	}
+	defer imageWiredLedger.exit(footprint)
+
 	var res *ImageResponse
 	if op == "edit" {
 		res, err = ip.EditImage(r.Context(), img)
@@ -1954,6 +2037,10 @@ func main() {
 		}
 	}
 
+	if v := latticeconfig.Env("LATTICE_GATEWAY_PROVIDER_QUEUE", ""); v != "" {
+		providerQueueMax = resolveProviderQueue(v)
+	}
+
 	cfgPath := latticeconfig.Env("LATTICE_GATEWAY_PROVIDERS", "")
 	reg, provs, err := loadProviders(cfgPath)
 	if err != nil {
@@ -1963,6 +2050,10 @@ func main() {
 	providerMutex.Lock()
 	providers = provs
 	providerMutex.Unlock()
+
+	// Track ollama's GPU residency so the wired ledger (wired.go) can refuse
+	// image renders that would collide with a resident llama-server.
+	goOllamaPSPoller()
 
 	for _, a := range gatewayBindAddrs() {
 		go serveOn(a)

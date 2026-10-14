@@ -41,6 +41,14 @@
         <string>0.0.0.0</string>
         <key>SD_PORT</key>
         <string>8902</string>
+        <!--
+          Page-cache warmer: after a render the used files are re-read every
+          SD_WARM_INTERVAL_S for SD_WARM_KEEP_S so the next cold sd-cli start
+          reads weights from RAM. Reads only, never mlock — pages stay
+          evictable cache. 0 disables.
+        -->
+        <key>SD_WARM_KEEP_S</key>
+        <string>300</string>
     </dict>
 
     <key>RunAtLoad</key>

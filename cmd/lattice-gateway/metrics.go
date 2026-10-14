@@ -60,6 +60,22 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	queueDepth := inferenceSlots.waiting()
 	slotsLimit := inferenceSlots.limitValue()
 
+	// Live residency state, the same numbers the wired gate (wired.go) enforces:
+	// what ollama is holding, what in-flight renders have booked, and per-provider
+	// slot occupancy. Read outside the store lock but consistent at scrape time.
+	resident := ollamaPSResidentBytes()
+	booked, imageInflight := imageWiredLedger.inFlight()
+
+	renderSlotsMu.Lock()
+	slotNames := make([]string, 0, len(renderSlots))
+	slots := make(map[string]*prioritySemaphore, len(renderSlots))
+	for n, s := range renderSlots {
+		slotNames = append(slotNames, n)
+		slots[n] = s
+	}
+	renderSlotsMu.Unlock()
+	sort.Strings(slotNames)
+
 	fmt.Fprintf(w, "# TYPE lattice_gateway_requests_total counter\n")
 	for _, model := range sortedKeys(requests) {
 		fmt.Fprintf(w, "lattice_gateway_requests_total{model=%q} %d\n", model, requests[model])
@@ -77,6 +93,20 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "lattice_gateway_queue_depth %d\n", queueDepth)
 	fmt.Fprintf(w, "# TYPE lattice_gateway_slots_limit gauge\n")
 	fmt.Fprintf(w, "lattice_gateway_slots_limit %d\n", slotsLimit)
+	fmt.Fprintf(w, "# TYPE lattice_gateway_resident_bytes gauge\n")
+	fmt.Fprintf(w, "lattice_gateway_resident_bytes %d\n", resident)
+	fmt.Fprintf(w, "# TYPE lattice_gateway_wired_estimate_bytes gauge\n")
+	fmt.Fprintf(w, "lattice_gateway_wired_estimate_bytes %d\n", resident+booked)
+	fmt.Fprintf(w, "# TYPE lattice_gateway_image_inflight gauge\n")
+	fmt.Fprintf(w, "lattice_gateway_image_inflight %d\n", imageInflight)
+	fmt.Fprintf(w, "# TYPE lattice_gateway_provider_inflight gauge\n")
+	for _, n := range slotNames {
+		fmt.Fprintf(w, "lattice_gateway_provider_inflight{provider=%q} %d\n", n, slots[n].usedValue())
+	}
+	fmt.Fprintf(w, "# TYPE lattice_gateway_provider_queue_depth gauge\n")
+	for _, n := range slotNames {
+		fmt.Fprintf(w, "lattice_gateway_provider_queue_depth{provider=%q} %d\n", n, slots[n].waiting())
+	}
 }
 
 func sortedKeys(m map[string]int64) []string {

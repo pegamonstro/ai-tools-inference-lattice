@@ -32,6 +32,14 @@ Design notes:
     ``--image-preprocess target=control,canny=true`` (the contract promises
     sidecar-side edge extraction; callers send a photo, not an edge map). With
     no conditioning keys present the command is identical to pre-extension.
+  * Page-cache warmer: after a successful render the used files (checkpoint,
+    LoRAs, conditioning models) are re-read in chunks once every
+    SD_WARM_INTERVAL_S while SD_WARM_KEEP_S hasn't expired, so the next
+    sd-cli cold start reads its weights from RAM instead of disk. Reads only —
+    never mlock — so warmed pages stay evictable file cache, not pinned
+    memory, and cannot recreate the resident-ollama collision the gateway's
+    wired budget guards against. A render pauses the warmer (per-request Popen
+    would fight it for RAM); it resumes on the next tick.
 
 Endpoints:
   GET  /health  -> {status, bin, default_model, ckpt_dir, control_dir,
@@ -81,6 +89,9 @@ BIND = os.environ.get("SD_BIND", "127.0.0.1")
 PORT = int(os.environ.get("SD_PORT", "8902"))
 TOKEN = os.environ.get("SD_TOKEN", "")  # optional shared secret
 GEN_TIMEOUT = int(os.environ.get("SD_GEN_TIMEOUT", "3600"))
+# Page-cache warmer (see design notes): SD_WARM_KEEP_S=0 disables.
+WARM_INTERVAL_S = float(os.environ.get("SD_WARM_INTERVAL_S", "30"))
+WARM_KEEP_S = float(os.environ.get("SD_WARM_KEEP_S", "300"))
 
 RESULTS_DIR = os.path.expanduser(os.environ.get("SD_RESULTS_DIR", "~/sd-outputs"))
 RESULTS_TTL_HOURS = float(os.environ.get("SD_RESULTS_TTL_HOURS", "24"))
@@ -89,6 +100,75 @@ RESULTS_MAX = int(os.environ.get("SD_RESULTS_MAX", "300"))
 _lock = threading.Lock()
 _cur_lock = threading.Lock()
 _current = None  # dict: {id, proc, step, total, started, cancelled, stderr, stdout}
+
+# Page-cache warmer state: the paths the last successful render used and the
+# time after which warming stops until the next render re-arms it.
+_warm_lock = threading.Lock()
+_warm_paths: list[str] = []
+_warm_deadline = 0.0
+
+
+def _render_active() -> bool:
+    with _cur_lock:
+        return _current is not None
+
+
+def _touch_file(path: str) -> None:
+    """Read the file's blocks into the page cache in large chunks — without
+    mlock, so the pages remain evictable file cache the OS can drop under
+    pressure instead of pinned memory."""
+    try:
+        with open(path, "rb") as fh:
+            while fh.read(8 * 1024 * 1024):
+                pass
+    except OSError:
+        pass
+
+
+def _warm_targets(params: dict) -> list[str]:
+    """The files this render actually loaded: checkpoint, LoRAs, and the
+    conditioning models a conditioned generate resolves."""
+    targets = []
+    try:
+        targets.append(_resolve_model(params))
+    except Exception:
+        pass
+    for lora in params.get("loras") or []:
+        targets.append(lora.get("name"))
+    ctrl = params.get("control_net")
+    if ctrl:
+        targets.append(os.path.join(CONTROL_MODEL_DIR, ctrl["net"] + ".safetensors"))
+    if params.get("ip_adapter"):
+        targets.extend([IPADAPTER_PATH, CLIP_VISION_PATH])
+    return targets
+
+
+def _arm_warm(paths: list) -> None:
+    """Arm the warmer for the files a successful render used. Snapshot only —
+    the touching happens on the warm thread, WARM_INTERVAL_S apart, until
+    WARM_KEEP_S elapses."""
+    if WARM_KEEP_S <= 0:
+        return
+    existing = [p for p in paths if p and os.path.isfile(p)]
+    with _warm_lock:
+        global _warm_paths, _warm_deadline
+        _warm_paths = existing
+        _warm_deadline = time.time() + WARM_KEEP_S
+    print(f"warm: armed {len(existing)} file(s) for {WARM_KEEP_S:g}s", flush=True)
+
+
+def _warm_loop() -> None:
+    while True:
+        time.sleep(WARM_INTERVAL_S)
+        with _warm_lock:
+            paths = list(_warm_paths)
+            deadline = _warm_deadline
+        if not paths or time.time() >= deadline or _render_active():
+            continue
+        t0 = time.time()
+        for p in paths:
+            _touch_file(p)
+        print(f"warm: touched {len(paths)} file(s) in {time.time() - t0:.1f}s", flush=True)
 
 # sd.cpp draws its per-step progress bar on stderr with \r separators
 # ("[ 42%|  3/20 ...]" style); same parse as the mflux sidecar's tqdm feed.
@@ -429,6 +509,10 @@ class Handler(BaseHTTPRequestHandler):
                 "height": params.get("height"),
                 "seconds": round(time.time() - t0, 1),
             })
+            # Arming happens here while _lock is still held: the snapshot reads
+            # only params (render-complete state), and _current is cleared in
+            # the finally below, so the first warm tick can't race the render.
+            _arm_warm(_warm_targets(params))
         finally:
             with _cur_lock:
                 if _current is state:
@@ -482,6 +566,7 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     os.makedirs(RESULTS_DIR, exist_ok=True)
     _sweep_results()
+    threading.Thread(target=_warm_loop, daemon=True).start()
     default = DEFAULT_MODEL
     if not default:
         try:
