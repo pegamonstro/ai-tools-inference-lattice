@@ -201,9 +201,11 @@ refuses a render the budget cannot hold (see §7):
   figure — staleness only ever over-counts, never under-protects.
 - **Render booking.** Each image render books an estimated footprint for its
   in-flight window: the model file's size, plus the conditioning files a
-  generate request with control / IP-Adapter references. A model path that
-  cannot be sized (missing file, or a directory-valued model) falls back to
-  8 GiB.
+  generate request with control / IP-Adapter references. The conditioning
+  paths are discovered from the SDXL sidecar's own `/health` on the same
+  5-second tick — the gateway env mirror (`SD_CKPT_DIR` and friends) is only
+  the fallback. A model path that cannot be sized (missing file, or a
+  directory-valued model) falls back to 8 GiB.
 - **The gate.** A render is admitted only when residency plus booked renders
   plus its footprint plus the gap (`LATTICE_GATEWAY_WIRED_GAP_MB`, default
   2048) stays inside the limit from §3's table. Refused renders get

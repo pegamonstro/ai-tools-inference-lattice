@@ -52,10 +52,11 @@
         <key>LATTICE_GATEWAY_PROVIDER_QUEUE</key>
         <string>2</string>
         <!--
-          When the sd sidecar's conditioning dirs move off their defaults,
-          mirror them here so imageFootprint() sizes the same files the
-          sidecar loads: SD_CKPT_DIR / SD_CONTROL_MODEL_DIR / SD_IPADAPTER_PATH /
-          SD_CLIP_VISION_PATH.
+          Optional fallback only: the gateway discovers the sdxl sidecar's
+          conditioning paths from its /health each poll tick, so imageFootprint()
+          sizes what the sidecar actually loads. Set SD_CKPT_DIR /
+          SD_CONTROL_MODEL_DIR / SD_IPADAPTER_PATH / SD_CLIP_VISION_PATH here
+          just to override that discovery.
         -->
     </dict>
 

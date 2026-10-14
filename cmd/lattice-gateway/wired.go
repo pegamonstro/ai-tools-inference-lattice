@@ -103,16 +103,19 @@ func pollOllamaPS() {
 	psCacheMu.Unlock()
 }
 
-// goOllamaPSPoller runs the residency poll in the background for the process's
-// lifetime: one immediate poll (so the first request sees real residency even
-// before the first tick) then every 5 seconds — staleness bounded at the poll
-// interval.
+// goOllamaPSPoller runs the residency poll and the sdxl conditioning discovery
+// in the background for the process's lifetime: one immediate pass (so the
+// first request sees real residency and real conditioning paths even before
+// the first tick) then every 5 seconds — staleness bounded at the poll
+// interval. Both polls are cheap GETs against colocated services.
 func goOllamaPSPoller() {
 	go func() {
 		pollOllamaPS()
+		pollSdConditioning()
 		ticker := time.NewTicker(5 * time.Second)
 		for range ticker.C {
 			pollOllamaPS()
+			pollSdConditioning()
 		}
 	}()
 }
@@ -231,15 +234,106 @@ func statBytes(path string) uint64 {
 	return uint64(fi.Size())
 }
 
-// sdConditioningPaths mirrors deploy/sd-sidecar.py's conditioning defaults
-// (SD_CKPT_DIR/SD_CONTROL_MODEL_DIR/SD_IPADAPTER_PATH/SD_CLIP_VISION_PATH).
-// The sidecar resolves its checkpoint dir at startup; the gateway resolves the
-// same defaults per request because the two processes are colocated on the
-// same host and share one filesystem. If the operator overrides the sidecar
-// env without mirroring it here, the mirror silently reads zero-byte files —
-// an accepted accounting gap (the sidecar would fail loudly on a truly missing
-// conditioning model long before residency could matter).
+// sdHealthState is the sd.cpp sidecar's own view of its conditioning files,
+// read from its GET /health each poll tick. The sidecar resolves its dirs at
+// startup, so discovery keeps the gateway's footprint accounting aligned with
+// the files the sidecar actually loads even when an operator moves them
+// without mirroring anything in the gateway env.
+type sdHealthState struct {
+	ckptDir, controlDir, ipadapter, clipVision string
+	ok                                         bool
+}
+
+var (
+	sdHealthMu        sync.Mutex
+	sdHealth          sdHealthState
+	sdHealthFailedMsg = "sdxl conditioning /health poll failed"
+)
+
+// pollSdConditioning refreshes the conditioning paths from the sd.cpp sidecar's
+// /health, so the gateway books the files the sidecar itself resolves. The
+// providers registry is scanned for a kind-"sdxl" provider (the registry key
+// is the provider name; the kind marks the engine). A /health body without
+// ckpt_dir is not accepted — half a truth would book zero-byte weights. When
+// there is no sdxl provider or the poll fails, the last-known state survives
+// and the env mirror rules; failures log transition-only, like the /api/ps
+// poll, so an outage cannot spam the log every 5 seconds.
+func pollSdConditioning() {
+	fail := func(err error) {
+		sdHealthMu.Lock()
+		was := sdHealth.ok
+		sdHealthMu.Unlock()
+		if was {
+			log.Printf("%s (keeping last-known paths): %v", sdHealthFailedMsg, err)
+		}
+	}
+
+	var endpoint string
+	for _, p := range providers {
+		if mp, ok := p.(*MfluxProvider); ok && mp.Name() == "sdxl" {
+			endpoint = mp.Endpoint
+			break
+		}
+	}
+	if endpoint == "" {
+		return // no sd.cpp engine routed; env mirror rules
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(endpoint + "/health")
+	if err != nil {
+		fail(err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fail(fmt.Errorf("/health returned %d", resp.StatusCode))
+		return
+	}
+	var health struct {
+		CkptDir    string `json:"ckpt_dir"`
+		ControlDir string `json:"control_dir"`
+		IPAdapter  string `json:"ip_adapter"`
+		ClipVision string `json:"clip_vision"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
+		fail(err)
+		return
+	}
+	if health.CkptDir == "" {
+		fail(fmt.Errorf("/health reports no ckpt_dir"))
+		return
+	}
+	sdHealthMu.Lock()
+	defer sdHealthMu.Unlock()
+	if !sdHealth.ok {
+		log.Printf("sdxl conditioning paths discovered from /health (ckpt %s)", health.CkptDir)
+	} else if sdHealth.controlDir != health.ControlDir || sdHealth.ipadapter != health.IPAdapter || sdHealth.clipVision != health.ClipVision {
+		log.Printf("sdxl conditioning paths updated from /health (ckpt %s)", health.CkptDir)
+	}
+	sdHealth = sdHealthState{
+		ckptDir:    health.CkptDir,
+		controlDir: health.ControlDir,
+		ipadapter:  health.IPAdapter,
+		clipVision: health.ClipVision,
+		ok:         true,
+	}
+}
+
+// sdConditioningPaths resolves the conditioning file paths the image footprint
+// books alongside a generate render. Primary source: the sd.cpp sidecar's own
+// /health (see pollSdConditioning), so the gateway books what the sidecar
+// actually loads. Fallback: the historic mirror of deploy/sd-sidecar.py's
+// defaults (SD_CKPT_DIR/SD_CONTROL_MODEL_DIR/SD_IPADAPTER_PATH/SD_CLIP_VISION_PATH)
+// — kept for sidecars that do not answer /health or before the first
+// successful poll. The two processes are colocated on the same host and share
+// one filesystem, so the mirror stays a valid approximation there.
 func sdConditioningPaths() (controlDir, ipadapter, clipVision string) {
+	sdHealthMu.Lock()
+	health := sdHealth
+	sdHealthMu.Unlock()
+	if health.ok {
+		return health.controlDir, health.ipadapter, health.clipVision
+	}
 	ckpt := os.Getenv("SD_CKPT_DIR")
 	if ckpt == "" {
 		home, _ := os.UserHomeDir()
