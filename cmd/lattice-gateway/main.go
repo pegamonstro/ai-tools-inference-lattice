@@ -448,36 +448,48 @@ func NewMemoryBudgeter() *MemoryBudgeter {
 	}
 }
 
-// freeBytes reads the host's free + inactive memory from vm_stat, converted by
-// page size. Extracted from CanAccommodate so a caller can ask the same question
-// against a different margin: the image model is far larger than a chat model,
-// so its margin is a different number, not a different check.
-func (mb *MemoryBudgeter) freeBytes() uint64 {
+// reclaimableBytes reads the host's reclaimable memory from vm_stat (free +
+// inactive + purgeable + speculative — pages that return without disk IO),
+// converted by page size. Extracted from CanAccommodate so a caller can ask the
+// same question against a different margin: the image model is far larger than
+// a chat model, so its margin is a different number, not a different check.
+func (mb *MemoryBudgeter) reclaimableBytes() uint64 {
 	out, err := exec.Command("vm_stat").Output()
 	if err != nil {
 		return 0
 	}
-	lines := strings.Split(string(out), "\n")
-	var freePages, inactivePages uint64
-	for _, line := range lines {
-		if strings.Contains(line, "Pages free") {
-			fmt.Sscanf(line, "Pages free: %d", &freePages)
-		} else if strings.Contains(line, "Pages inactive") {
-			fmt.Sscanf(line, "Pages inactive: %d", &inactivePages)
+	return vmStatReclaimable(out, mb.pageSize)
+}
+
+// vmStatReclaimable totals the vm_stat pages that come back on demand: free,
+// inactive, purgeable (their owners marked them droppable) and speculative
+// (prefetched, unclaimed). Compressor and wired pages are excluded — those are
+// somebody's memory, not idle capacity.
+func vmStatReclaimable(stat []byte, pageSize uint64) uint64 {
+	var free, inactive, purgeable, speculative uint64
+	for _, line := range strings.Split(string(stat), "\n") {
+		if strings.HasPrefix(line, "Pages free:") {
+			fmt.Sscanf(line, "Pages free: %d", &free)
+		} else if strings.HasPrefix(line, "Pages inactive:") {
+			fmt.Sscanf(line, "Pages inactive: %d", &inactive)
+		} else if strings.HasPrefix(line, "Pages purgeable:") {
+			fmt.Sscanf(line, "Pages purgeable: %d", &purgeable)
+		} else if strings.HasPrefix(line, "Pages speculative:") {
+			fmt.Sscanf(line, "Pages speculative: %d", &speculative)
 		}
 	}
-	return (freePages + inactivePages) * mb.pageSize
+	return (free + inactive + purgeable + speculative) * pageSize
 }
 
 func (mb *MemoryBudgeter) CanAccommodate() bool {
-	return mb.freeBytes() > mb.safeMargin
+	return mb.reclaimableBytes() > mb.safeMargin
 }
 
 // CanAccommodateWith is CanAccommodate against a caller-supplied margin. The
 // image handler uses it with the image margin, which is an order of magnitude
 // larger than the chat margin because the diffusion model is ~9 GB resident.
 func (mb *MemoryBudgeter) CanAccommodateWith(marginBytes uint64) bool {
-	return mb.freeBytes() > marginBytes
+	return mb.reclaimableBytes() > marginBytes
 }
 
 // availableBytes is the memory actually usable for new model loads: freeBytes
@@ -485,7 +497,7 @@ func (mb *MemoryBudgeter) CanAccommodateWith(marginBytes uint64) bool {
 // rather than the raw free figure so a load never plans to consume the margin
 // the budgeter relies on to avoid swap.
 func (mb *MemoryBudgeter) availableBytes() uint64 {
-	free := mb.freeBytes()
+	free := mb.reclaimableBytes()
 	if free <= mb.safeMargin {
 		return 0
 	}
@@ -1822,10 +1834,9 @@ func ollamaTags() ([]string, []int64, error) {
 // will actually be served. It shares the announcement logic with /health; only
 // the shape differs.
 func handleModels(w http.ResponseWriter, r *http.Request) {
-	if !budgeter.CanAccommodate() {
-		http.Error(w, "Memory pressure high", http.StatusServiceUnavailable)
-		return
-	}
+	// No memory gate: the menu is informational. Pressure is enforced at
+	// admission (429), not at discovery — refusing /v1/models only breaks
+	// clients negotiating menus between jobs.
 	tagNames, _, err := ollamaTags()
 	if err != nil {
 		http.Error(w, "Ollama unhealthy", http.StatusServiceUnavailable)
@@ -1872,11 +1883,11 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	if !budgeter.CanAccommodate() {
-		http.Error(w, "Memory pressure high", http.StatusServiceUnavailable)
-		return
-	}
-
+	// Liveness only — no memory gate. The control plane polls /health and
+	// drops an unhealthy gateway from every capability for a whole poll
+	// cycle, so a memory dip during a big render would 503 unrelated
+	// requests. Pressure degrades through admission and the slot ceiling,
+	// which see the same budgeter at request time.
 	tagNames, sizes, err := ollamaTags()
 	if err != nil {
 		http.Error(w, "Ollama unhealthy", http.StatusServiceUnavailable)
@@ -1892,9 +1903,9 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		imageModels = registry.announcedImageModels()
 	}
 
-	// Recompute the concurrency ceiling from free memory and the announced model
-	// sizes, then apply it to the semaphore so the reported slot count and the
-	// actual enforcement always agree.
+	// Recompute the concurrency ceiling from reclaimable memory and the announced
+	// model sizes, then apply it to the semaphore so the reported slot count and
+	// the actual enforcement always agree.
 	slots := computeSlots(sizes, budgeter.availableBytes(), maxSlots)
 	inferenceSlots.setLimit(slots)
 
