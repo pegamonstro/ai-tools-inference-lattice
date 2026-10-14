@@ -1,0 +1,15 @@
+[Unit]
+Description=Lattice model repo (content-addressed model blob store)
+Documentation=https://github.com/pegamonstro/ai-tools-inference-lattice
+
+[Service]
+Type=simple
+# The store volume must be present; the service creates its subtree on start
+# but refuses to serve without the configured LATTICE_MODELREPO_STORE.
+EnvironmentFile=%h/.config/lattice/lattice-modelrepo.env
+ExecStart=%h/bin/lattice-modelrepo
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

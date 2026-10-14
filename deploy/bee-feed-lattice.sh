@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Lattice per-event feeder → Bee terminal log screen (rpi4).
 #
-# Tails the control-plane, frontend, and gateway telemetry JSONL files and
-# pushes every routing decision / completion / execution to /run/bee/logs.sock
-# as a compact human line. Long-running (Type=simple) user service. No
-# rate-limiting: the goal is *every* event, not a summary.
+# Tails the control-plane, frontend, gateway, and model-repo telemetry JSONL
+# files and pushes every routing decision / completion / execution / blob
+# transfer to /run/bee/logs.sock as a compact human line. Long-running
+# (Type=simple) user service. No rate-limiting: the goal is *every* event, not
+# a summary.
 set -uo pipefail
 
 # bee-feed-lib.sh lives under the feeder account's home (see the .service unit);
@@ -14,13 +15,14 @@ source "${BEE_FEED_LIB:-$HOME/work/bee-feeders/bin/bee-feed-lib.sh}"
 CONTROL_LOG="/var/log/lattice/telemetry-control.jsonl"
 FRONTEND_LOG="/var/log/lattice/telemetry-frontend.jsonl"
 GATEWAY_LOG="/var/log/lattice/telemetry-gateway.jsonl"
+MODELREPO_LOG="/var/log/lattice/telemetry-modelrepo.jsonl"
 
-# One tail over all three files; control events carry decision_time_s, frontend
-# events carry total_time_s, gateway events carry elapsed_s, so we branch on
-# which key is present rather than on the source file. The gateway file is
-# written by the control plane (which pulls it from the Mac over HTTP) and may
-# not exist yet — tail -F waits for it.
-tail -n0 -F "$CONTROL_LOG" "$FRONTEND_LOG" "$GATEWAY_LOG" 2>/dev/null | while IFS= read -r line; do
+# One tail over all four files; control events carry decision_time_s, frontend
+# events carry total_time_s, gateway events carry elapsed_s, model-repo rows
+# carry elapsed_ms, so we branch on which key is present rather than on the
+# source file. The gateway file is written by the control plane (which pulls
+# it from the Mac over HTTP) and may not exist yet — tail -F waits for it.
+tail -n0 -F "$CONTROL_LOG" "$FRONTEND_LOG" "$GATEWAY_LOG" "$MODELREPO_LOG" 2>/dev/null | while IFS= read -r line; do
   body=$(printf '%s\n' "$line" | python3 -c '
 import sys, json
 try:
@@ -52,6 +54,10 @@ elif "elapsed_s" in d:
         rid, model, d.get("context_window", 0),
         d.get("prompt_tokens", 0), d.get("completion_tokens", 0),
         d.get("elapsed_s", 0), tail))
+elif "elapsed_ms" in d:
+    print("store %s %s %s -> %d %dms %dB%s" % (
+        rid, d.get("method", ""), d.get("path", ""),
+        d.get("status", 0), d.get("elapsed_ms", 0), d.get("bytes", 0), tail))
 else:
     sys.exit(1)
 ' 2>/dev/null) || continue
