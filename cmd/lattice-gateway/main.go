@@ -154,6 +154,35 @@ type Usage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
+// ImageExtension carries the Phase-B conditioning contract img-gen's SDXL
+// sidecar documents: ControlNet (net/image/strength) and IP-Adapter
+// (image/strength), wrapped under "extension" exactly as the client sends
+// them. The gateway validates nothing here beyond decoding — the sidecar
+// owns range checks and model-file availability — and relays them as
+// top-level control_net/ip_adapter, the shape deploy/sd-sidecar.py speaks.
+// Absent pointers stay absent downstream, so a request without conditioning
+// produces a body byte-identical to the pre-extension protocol.
+type ImageExtension struct {
+	Control   *ImageControl   `json:"control,omitempty"`
+	IPAdapter *ImageIPAdapter `json:"ip_adapter,omitempty"`
+}
+
+// ImageControl is one ControlNet reference. Net names the map kind the
+// sidecar has a control model for (pose, depth, canny); Image is the base64
+// conditioning map.
+type ImageControl struct {
+	Net      string   `json:"net"`
+	Image    string   `json:"image"`
+	Strength *float64 `json:"strength,omitempty"`
+}
+
+// ImageIPAdapter is one identity reference. Image is the base64 reference
+// the clip-vision encoder embeds.
+type ImageIPAdapter struct {
+	Image    string   `json:"image"`
+	Strength *float64 `json:"strength,omitempty"`
+}
+
 // ImageRequest is the OpenAI Images API request. It is a closed shape on
 // purpose: an image request carries the OpenAI fields the engine honours plus
 // the Lattice extensions documented below. An unsupported OpenAI field
@@ -182,6 +211,11 @@ type ImageRequest struct {
 	NegativePrompt string   `json:"negative_prompt,omitempty"`
 	Seed           *int     `json:"seed,omitempty"`
 	Strength       *float64 `json:"strength,omitempty"`
+	// Extension is the Lattice conditioning envelope ("extension" on the
+	// body): ControlNet and IP-Adapter references img-gen sends on SDXL
+	// generate requests. Relay-only — providers translate it into the
+	// sidecar's control_net/ip_adapter keys; edit requests never set it.
+	Extension *ImageExtension `json:"extension,omitempty"`
 	// SidecarModel is not client-owned: handleImage fills it from the registry's
 	// upstream mapping when the requested image model names one, and it is what
 	// selects the model the sidecar loads. Empty keeps the sidecar's env-default
