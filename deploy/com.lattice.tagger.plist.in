@@ -8,7 +8,7 @@
   Runs on the Mac (the MLX-adjacent ML host) behind TAGGER_URL.
 
   Like the rembg sidecar, this needs onnxruntime + Pillow + numpy +
-  huggingface_hub in-process, so TAGGER_PYTHON is a uv venv interpreter
+  huggingface_hub in-process, so __TAGGER_PYTHON__ is a uv venv interpreter
   (tagger-venv/bin/python under the deploy root). The WD14 model weights
   (~0.5 GB) auto-download from Hugging Face on first tag request; the
   sidecar keeps the ONNX session and vocabulary resident after that.
