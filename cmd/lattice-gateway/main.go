@@ -1347,6 +1347,16 @@ func contextWindow(model string, messages []interface{}, maxTokens int, provider
 // estimateTokens gives a rough prompt size in tokens. Ollama exposes no stable
 // standalone tokenizer in its OpenAI-compat API, so we use ~4 chars/token — close
 // enough for sizing a context bucket, not for exact accounting.
+//
+// Two message shapes feed it. OpenAI parts arrays (pre-translation, direct
+// callers) count text plus an image_url's payload at ~4 chars/token. The
+// production shape is post-translation: handleInference flattened content to a
+// string and moved the images onto the Ollama-native "images" list of base64
+// strings, counted here — the flat 1000-token image allowance plus payload, but
+// with the payload term capped at 2048 tokens. The cap matters because KV
+// sizing is the memory-unsafe direction: an uncapped estimate feeds num_ctx,
+// and one pasted image must never be able to pin the context at the maxContext
+// ceiling (32768) and take the KV cache with it.
 func estimateTokens(messages []interface{}) int {
 	total := 0
 	for _, m := range messages {
@@ -1377,6 +1387,30 @@ func estimateTokens(messages []interface{}) int {
 					}
 				}
 			}
+		}
+		// Translated shape (production): images ride the message as base64
+		// strings, same flat allowance as an image_url part.
+		var imgs []string
+		switch v := mm["images"].(type) {
+		case []string:
+			imgs = v
+		case []interface{}:
+			imgs = make([]string, 0, len(v))
+			for _, im := range v {
+				if s, ok := im.(string); ok {
+					imgs = append(imgs, s)
+				}
+			}
+		}
+		for _, b64 := range imgs {
+			total += 1000 // fixed allowance per image, erroring toward safety
+			n := (len(b64) + 3) / 4
+			if n > 2048 {
+				// Capped: the payload term feeds num_ctx, and KV cache is the
+				// memory-unsafe direction (see the comment above).
+				n = 2048
+			}
+			total += n
 		}
 	}
 	return total
