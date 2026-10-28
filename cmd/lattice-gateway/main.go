@@ -824,13 +824,14 @@ func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, e
 	// small KV cache (low memory), while large agent prompts grow it. reasoning_effort
 	// raises the ceiling, and a configurable cap prevents the 131072-token default
 	// from bloating memory.
-	msgs, err := ollamaMessages(req.Messages)
-	if err != nil {
-		return nil, fmt.Errorf("invalid message content: %w", err)
+	// Normalize tool_calls for direct callers (tests, etc.); handleInference
+	// already did this and handled content-part errors, so we ignore any error.
+	if msgs, err := ollamaMessages(req.Messages); err == nil {
+		req.Messages = msgs
 	}
 	ollamaReq := map[string]interface{}{
 		"model":    req.Model,
-		"messages": msgs,
+		"messages": req.Messages,
 		"tools":    req.Tools,
 		"stream":   false,
 		"think":    thinkRequested(req),
@@ -951,13 +952,14 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 	targetURL, _ := url.Parse(p.Endpoint + "/api/chat")
 	maxTokens := resolveMaxTokens(req)
 
-	msgs, err := ollamaMessages(req.Messages)
-	if err != nil {
-		return nil, false, fmt.Errorf("invalid message content: %w", err)
+	// Normalize tool_calls for direct callers (tests, etc.); handleInference
+	// already did this and handled content-part errors, so we ignore any error.
+	if msgs, err := ollamaMessages(req.Messages); err == nil {
+		req.Messages = msgs
 	}
 	ollamaReq := map[string]interface{}{
 		"model":    req.Model,
-		"messages": msgs,
+		"messages": req.Messages,
 		"tools":    req.Tools,
 		"stream":   true,
 		"think":    thinkRequested(req),
@@ -1487,9 +1489,17 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Translate OpenAI content parts to Ollama native format early so client
+	// errors (non-data URLs, malformed parts) surface as 400.
+	msgs, err := ollamaMessages(req.Messages)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	t0 := time.Now()
 	maxTokens := resolveMaxTokens(req)
-	ctxWindow := contextWindow(req.Model, req.Messages, maxTokens, req.Routing.ProviderParams)
+	ctxWindow := contextWindow(req.Model, msgs, maxTokens, req.Routing.ProviderParams)
 
 	fmt.Printf("Gateway executing request [%s] for model %s\n", req.Routing.RequestID, req.Model)
 
@@ -1524,6 +1534,7 @@ func handleInference(w http.ResponseWriter, r *http.Request) {
 	// copy handed to the provider carries the upstream name.
 	upstreamReq := req
 	upstreamReq.Model = upstream
+	upstreamReq.Messages = msgs
 
 	// Stream when the client asked for it and the provider supports it: most real
 	// chat clients stream by default and would otherwise render an empty reply.

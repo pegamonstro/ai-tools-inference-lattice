@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -111,5 +113,109 @@ func TestEstimateTokensCountsImages(t *testing.T) {
 	// (8000+3)/4 = 2000 for the payload plus the fixed 1000-token image allowance.
 	if withImg-base < 3000 || withImg-base > 3000+2 {
 		t.Fatalf("image estimate %d, want ~%d", withImg-base, 2000+1000)
+	}
+}
+
+// newTestRouter returns a test router with a mock Ollama that returns a minimal valid response.
+func newTestRouter() *httptest.ResponseRecorder {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"test","message":{"role":"assistant","content":"ok"},"prompt_eval_count":1,"eval_count":1}`))
+	}))
+	defer ollama.Close()
+
+	budgeter = NewMemoryBudgeter()
+	providers = map[string]Provider{"ollama": &OllamaProvider{Endpoint: ollama.URL}}
+	registry = nil
+	ollamaURL = ollama.URL
+	inferenceSlots = newPrioritySemaphore(1, 1.0)
+
+	mux := newRouter()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	return w
+}
+
+func TestHandleInferenceNonDataURLReturns400(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("Ollama should not be called for invalid request")
+	}))
+	defer ollama.Close()
+
+	budgeter = NewMemoryBudgeter()
+	providers = map[string]Provider{"ollama": &OllamaProvider{Endpoint: ollama.URL}}
+	registry = nil
+	ollamaURL = ollama.URL
+	inferenceSlots = newPrioritySemaphore(1, 1.0)
+
+	mux := newRouter()
+
+	body := `{"model":"test","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/cat.png"}}]}],"stream":false}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "data:") {
+		t.Fatalf("error body should mention data: URLs: %s", w.Body.String())
+	}
+}
+
+func TestHandleInferenceStreamNonDataURLReturns400(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("Ollama should not be called for invalid request")
+	}))
+	defer ollama.Close()
+
+	budgeter = NewMemoryBudgeter()
+	providers = map[string]Provider{"ollama": &OllamaProvider{Endpoint: ollama.URL}}
+	registry = nil
+	ollamaURL = ollama.URL
+	inferenceSlots = newPrioritySemaphore(1, 1.0)
+
+	mux := newRouter()
+
+	body := `{"model":"test","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/cat.png"}}]}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "data:") {
+		t.Fatalf("error body should mention data: URLs: %s", w.Body.String())
+	}
+}
+
+func TestHandleInferenceMalformedPartReturns400(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("Ollama should not be called for invalid request")
+	}))
+	defer ollama.Close()
+
+	budgeter = NewMemoryBudgeter()
+	providers = map[string]Provider{"ollama": &OllamaProvider{Endpoint: ollama.URL}}
+	registry = nil
+	ollamaURL = ollama.URL
+	inferenceSlots = newPrioritySemaphore(1, 1.0)
+
+	mux := newRouter()
+
+	// Content part that is not an object (string instead of object)
+	body := `{"model":"test","messages":[{"role":"user","content":["not an object"]}],"stream":false}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 }
