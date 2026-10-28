@@ -160,46 +160,53 @@ func ollamaMessages(messages []interface{}) ([]interface{}, error) {
 				}
 				copyMsg[k] = v
 			}
-			out[i] = copyMsg
+			// Flattening composes with tool-call normalization: a parts array
+			// beside tool_calls still needs the argument re-emit below.
+			out[i] = normalizeToolCalls(copyMsg)
 			continue
 		}
-		// Tool-call argument normalization, unchanged (see ollamaArguments).
-		rawCalls, ok := msg["tool_calls"].([]interface{})
-		if !ok {
-			out[i] = rawMsg
-			continue
-		}
-		copyMsg := make(map[string]interface{}, len(msg))
-		for k, v := range msg {
-			copyMsg[k] = v
-		}
-		calls := make([]interface{}, len(rawCalls))
-		for j, rawCall := range rawCalls {
-			call, ok := rawCall.(map[string]interface{})
-			if !ok {
-				calls[j] = rawCall
-				continue
-			}
-			copyCall := make(map[string]interface{}, len(call))
-			for k, v := range call {
-				copyCall[k] = v
-			}
-			if fn, ok := copyCall["function"].(map[string]interface{}); ok {
-				copyFn := make(map[string]interface{}, len(fn))
-				for k, v := range fn {
-					copyFn[k] = v
-				}
-				if args, ok := fn["arguments"].(string); ok {
-					copyFn["arguments"] = ollamaArguments(args)
-				}
-				copyCall["function"] = copyFn
-			}
-			calls[j] = copyCall
-		}
-		copyMsg["tool_calls"] = calls
-		out[i] = copyMsg
+		out[i] = normalizeToolCalls(msg)
 	}
 	return out, nil
+}
+
+// normalizeToolCalls re-emits OpenAI tool-call arguments for Ollama's native
+// /api/chat (see ollamaArguments) on a copy of msg. A message without a
+// tool_calls list is returned unchanged, so pre-tool bodies stay byte-identical.
+func normalizeToolCalls(msg map[string]interface{}) map[string]interface{} {
+	rawCalls, ok := msg["tool_calls"].([]interface{})
+	if !ok {
+		return msg
+	}
+	copyMsg := make(map[string]interface{}, len(msg))
+	for k, v := range msg {
+		copyMsg[k] = v
+	}
+	calls := make([]interface{}, len(rawCalls))
+	for j, rawCall := range rawCalls {
+		call, ok := rawCall.(map[string]interface{})
+		if !ok {
+			calls[j] = rawCall
+			continue
+		}
+		copyCall := make(map[string]interface{}, len(call))
+		for k, v := range call {
+			copyCall[k] = v
+		}
+		if fn, ok := copyCall["function"].(map[string]interface{}); ok {
+			copyFn := make(map[string]interface{}, len(fn))
+			for k, v := range fn {
+				copyFn[k] = v
+			}
+			if args, ok := fn["arguments"].(string); ok {
+				copyFn["arguments"] = ollamaArguments(args)
+			}
+			copyCall["function"] = copyFn
+		}
+		calls[j] = copyCall
+	}
+	copyMsg["tool_calls"] = calls
+	return copyMsg
 }
 
 type Message struct {

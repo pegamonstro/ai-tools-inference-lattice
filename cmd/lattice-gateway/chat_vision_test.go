@@ -123,10 +123,10 @@ func TestOllamaMessagesToolCallsStillNormalize(t *testing.T) {
 func TestOllamaMessagesPartsCompositeStillNormalizesToolCalls(t *testing.T) {
 	in := []any{map[string]any{
 		"role":    "assistant",
-		"content": []any{textPart("calling tool"), imgPart("data:image/png;base64,"+tinyPNGb64)},
+		"content": []any{textPart("calling tool"), imgPart("data:image/png;base64," + tinyPNGb64)},
 		"tool_calls": []any{map[string]any{
-			"id":   "call_x",
-			"type": "function",
+			"id":       "call_x",
+			"type":     "function",
 			"function": map[string]any{"name": "f", "arguments": `{"a":1}`},
 		}},
 	}}

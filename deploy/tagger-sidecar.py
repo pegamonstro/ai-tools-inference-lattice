@@ -67,8 +67,11 @@ def _load() -> None:
         so.inter_op_num_threads, so.intra_op_num_threads = 2, 2
         _session = ort.InferenceSession(model_path, sess_options=so, providers=["CPUExecutionProvider"])
         _input_name = _session.get_inputs()[0].name
-        # Model input shape is [1, 448, 448, 3] (NHWC); height/width are at index 1,2
-        _input_size = _session.get_inputs()[0].shape[1] or 448
+        # Model input shape is [1, 448, 448, 3] (NHWC); height/width are at index 1,2.
+        # Only trust a real int there: ONNX symbolic dims are strings ("batch", ...),
+        # and an NCHW repo override puts channels at index 1 — both fall back to 448.
+        _shape = _session.get_inputs()[0].shape
+        _input_size = _shape[1] if isinstance(_shape[1], int) and int(_shape[1]) > 16 else 448
 
 
 def _preprocess(raw: bytes) -> np.ndarray:
