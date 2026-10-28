@@ -92,11 +92,37 @@ func ollamaArguments(raw string) json.RawMessage {
 	return json.RawMessage("{}")
 }
 
+// visionPart is one OpenAI-style content part. Only the two shapes the
+// gateway understands are modeled: text and image_url.
+type visionPart struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ImageURL string `json:"image_url"` // object {url} in JSON; decoded manually below
+}
+
+// imageURLB64 extracts the base64 payload of a data: URL, "" when the URL
+// is not one.
+func imageURLB64(u string) string {
+	const marker = "base64,"
+	if !strings.HasPrefix(u, "data:") {
+		return ""
+	}
+	if i := strings.Index(u, marker); i >= 0 {
+		return u[i+len(marker):]
+	}
+	return ""
+}
+
 // ollamaMessages normalizes an OpenAI-shaped history for Ollama's native
-// /api/chat by remapping tool-call arguments from the JSON-encoded strings the
-// OpenAI convention uses to the object shape Ollama requires (see
-// ollamaArguments). Messages without tool calls pass through unchanged.
-func ollamaMessages(messages []interface{}) []interface{} {
+// /api/chat (see ollamaArguments). Beyond tool-call arguments it now also
+// flattens OpenAI-style content-part arrays: text parts concatenate into
+// content, and each image part's data URL becomes an entry on the Ollama
+// message's native images array. A parts message with a non-data image URL
+// is an error — the gateway cannot fetch remote URLs, and silently dropping
+// the image would be a correctness lie. Messages without arrays or images
+// pass through unchanged, so a body identical to the pre-image protocol
+// produces byte-identical output.
+func ollamaMessages(messages []interface{}) ([]interface{}, error) {
 	out := make([]interface{}, len(messages))
 	for i, rawMsg := range messages {
 		msg, ok := rawMsg.(map[string]interface{})
@@ -104,6 +130,48 @@ func ollamaMessages(messages []interface{}) []interface{} {
 			out[i] = rawMsg
 			continue
 		}
+		// Content-part array flattening.
+		if rawParts, isArr := msg["content"].([]interface{}); isArr {
+			copyMsg := make(map[string]interface{}, len(msg)+1)
+			var text strings.Builder
+			var images []string
+			for _, rp := range rawParts {
+				p, ok := rp.(map[string]interface{})
+				if !ok {
+					return nil, fmt.Errorf("message content part %d is not an object", i)
+				}
+				switch p["type"] {
+				case "text":
+					if s, ok := p["text"].(string); ok {
+						text.WriteString(s)
+					}
+				case "image_url":
+					iu, _ := p["image_url"].(map[string]interface{})
+					u, _ := iu["url"].(string)
+					b64 := imageURLB64(u)
+					if b64 == "" {
+						return nil, fmt.Errorf("image content part URL must be a data: URL (the gateway cannot fetch remote URLs)")
+					}
+					images = append(images, b64)
+				default:
+					// Unknown part types are ignored: OpenAI adds part types
+					// over time and a text-only consumer must keep working.
+				}
+			}
+			copyMsg["content"] = text.String()
+			if len(images) > 0 {
+				copyMsg["images"] = images
+			}
+			for k, v := range msg {
+				if k == "content" {
+					continue
+				}
+				copyMsg[k] = v
+			}
+			out[i] = copyMsg
+			continue
+		}
+		// Tool-call argument normalization, unchanged (see ollamaArguments).
 		rawCalls, ok := msg["tool_calls"].([]interface{})
 		if !ok {
 			out[i] = rawMsg
@@ -139,7 +207,7 @@ func ollamaMessages(messages []interface{}) []interface{} {
 		copyMsg["tool_calls"] = calls
 		out[i] = copyMsg
 	}
-	return out
+	return out, nil
 }
 
 type Message struct {
@@ -756,9 +824,13 @@ func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, e
 	// small KV cache (low memory), while large agent prompts grow it. reasoning_effort
 	// raises the ceiling, and a configurable cap prevents the 131072-token default
 	// from bloating memory.
+	msgs, err := ollamaMessages(req.Messages)
+	if err != nil {
+		return nil, fmt.Errorf("invalid message content: %w", err)
+	}
 	ollamaReq := map[string]interface{}{
 		"model":    req.Model,
-		"messages": ollamaMessages(req.Messages),
+		"messages": msgs,
 		"tools":    req.Tools,
 		"stream":   false,
 		"think":    thinkRequested(req),
@@ -879,9 +951,13 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 	targetURL, _ := url.Parse(p.Endpoint + "/api/chat")
 	maxTokens := resolveMaxTokens(req)
 
+	msgs, err := ollamaMessages(req.Messages)
+	if err != nil {
+		return nil, false, fmt.Errorf("invalid message content: %w", err)
+	}
 	ollamaReq := map[string]interface{}{
 		"model":    req.Model,
-		"messages": ollamaMessages(req.Messages),
+		"messages": msgs,
 		"tools":    req.Tools,
 		"stream":   true,
 		"think":    thinkRequested(req),
@@ -1287,9 +1363,32 @@ func contextWindow(model string, messages []interface{}, maxTokens int, provider
 func estimateTokens(messages []interface{}) int {
 	total := 0
 	for _, m := range messages {
-		if mm, ok := m.(map[string]interface{}); ok {
-			if c, ok := mm["content"].(string); ok {
-				total += (len(c) + 3) / 4
+		mm, ok := m.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		switch c := mm["content"].(type) {
+		case string:
+			total += (len(c) + 3) / 4
+		case []interface{}:
+			for _, rp := range c {
+				p, ok := rp.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				switch p["type"] {
+				case "text":
+					if s, ok := p["text"].(string); ok {
+						total += (len(s) + 3) / 4
+					}
+				case "image_url":
+					total += 1000 // fixed allowance per image, erroring toward safety
+					if iu, _ := p["image_url"].(map[string]interface{}); iu != nil {
+						if u, _ := iu["url"].(string); u != "" {
+							total += (len(imageURLB64(u)) + 3) / 4
+						}
+					}
+				}
 			}
 		}
 	}
