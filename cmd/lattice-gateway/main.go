@@ -92,14 +92,6 @@ func ollamaArguments(raw string) json.RawMessage {
 	return json.RawMessage("{}")
 }
 
-// visionPart is one OpenAI-style content part. Only the two shapes the
-// gateway understands are modeled: text and image_url.
-type visionPart struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	ImageURL string `json:"image_url"` // object {url} in JSON; decoded manually below
-}
-
 // imageURLB64 extracts the base64 payload of a data: URL, "" when the URL
 // is not one.
 func imageURLB64(u string) string {
@@ -135,10 +127,10 @@ func ollamaMessages(messages []interface{}) ([]interface{}, error) {
 			copyMsg := make(map[string]interface{}, len(msg)+1)
 			var text strings.Builder
 			var images []string
-			for _, rp := range rawParts {
+			for partIdx, rp := range rawParts {
 				p, ok := rp.(map[string]interface{})
 				if !ok {
-					return nil, fmt.Errorf("message content part %d is not an object", i)
+					return nil, fmt.Errorf("message content part %d is not an object", partIdx)
 				}
 				switch p["type"] {
 				case "text":
@@ -823,9 +815,10 @@ func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, e
 	// Context window is sized dynamically to the prompt: short prompts keep a
 	// small KV cache (low memory), while large agent prompts grow it. reasoning_effort
 	// raises the ceiling, and a configurable cap prevents the 131072-token default
-	// from bloating memory.
-	// Normalize tool_calls for direct callers (tests, etc.); handleInference
-	// already did this and handled content-part errors, so we ignore any error.
+	// from bloating memory. handleInference already translated messages
+	// (content parts + tool_calls); direct callers (tests) need tool_calls
+	// normalization so we run ollamaMessages but ignore content-part errors
+	// (already validated upstream if coming from handleInference).
 	if msgs, err := ollamaMessages(req.Messages); err == nil {
 		req.Messages = msgs
 	}
@@ -952,8 +945,9 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 	targetURL, _ := url.Parse(p.Endpoint + "/api/chat")
 	maxTokens := resolveMaxTokens(req)
 
-	// Normalize tool_calls for direct callers (tests, etc.); handleInference
-	// already did this and handled content-part errors, so we ignore any error.
+	// handleInference already translated messages (content parts + tool_calls);
+	// direct callers (tests) need tool_calls normalization so we run ollamaMessages
+	// but ignore content-part errors (already validated upstream if coming from handleInference).
 	if msgs, err := ollamaMessages(req.Messages); err == nil {
 		req.Messages = msgs
 	}
