@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lattice WD14 tagger sidecar — macOS LaunchAgent template.
+
+  The SmilingWolf/wd-v1-4-convnextv2-tagger-v2 ONNX backend for img-gen's
+  Phase D critic (objective drift detector via tag vocabulary overlap).
+  Runs on the Mac (the MLX-adjacent ML host) behind TAGGER_URL.
+
+  Like the rembg sidecar, this needs onnxruntime + Pillow + numpy +
+  huggingface_hub in-process, so TAGGER_PYTHON is a uv venv interpreter
+  (tagger-venv/bin/python under the deploy root). The WD14 model weights
+  (~0.5 GB) auto-download from Hugging Face on first tag request; the
+  sidecar keeps the ONNX session and vocabulary resident after that.
+
+  TAGGER_BIND must be 0.0.0.0 so img-gen (on another host) can reach it over
+  the tailnet; the sidecar is unauthenticated, matching the mflux/esrgan/rembg
+  posture. Port 8904 (8903 rembg, 8902 sdxl, 8901 esrgan).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lattice.tagger</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__TAGGER_PYTHON__</string>
+        <string>__REPO_ROOT__/deploy/tagger-sidecar.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TAGGER_BIND</key>
+        <string>0.0.0.0</string>
+        <key>TAGGER_PORT</key>
+        <string>8904</string>
+        <key>TAGGER_REPO</key>
+        <string>SmilingWolf/wd-v1-4-convnextv2-tagger-v2</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/lattice-tagger.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/lattice-tagger.err.log</string>
+</dict>
+</plist>
