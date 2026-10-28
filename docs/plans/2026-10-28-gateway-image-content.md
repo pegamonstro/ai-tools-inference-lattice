@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Source repo for every task below: `/Users/archcore/Projects/LLM-router` (its own git history; commits land here, not in img-gen).
+- Source repo for every task below: `/Users/<you>/Projects/LLM-router` (its own git history; commits land here, not in img-gen).
 - `.gitignore:14` is a repo-wide `*.py` rule: sidecar `.py` files are tracked via `git add -f` (house pattern, same as rembg/esrgan).
 - No real usernames/hostnames/IPs in tracked files (plist/env templates only; this is the repo's standing invariant).
 - Never deploy to M6 in these tasks. Deployment (build darwin-arm64 → scp → codesign → bootout/bootstrap, never kickstart) is an explicit-user-authorization step afterward; rollback is `lattice-gateway.bak`.
@@ -515,7 +515,7 @@ if __name__ == "__main__":
 - [ ] **Step 3: Local smoke (venv + real weights)**
 
 ```bash
-cd /Users/archcore/Projects/LLM-router/deploy
+cd /Users/<you>/Projects/LLM-router/deploy
 uv venv tagger-venv --python 3.12
 uv pip install --python tagger-venv/bin/python "onnxruntime" "pillow" "numpy" "huggingface_hub"
 TAGGER_BIND=127.0.0.1 TAGGER_PORT=8904 tagger-venv/bin/python tagger-sidecar.py &
@@ -573,7 +573,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 - [ ] **Step 3: Whole-repo suite**
 
-Run: `go test ./...` in `/Users/archcore/Projects/LLM-router`
+Run: `go test ./...` in `/Users/<you>/Projects/LLM-router`
 Expected: PASS (the modelrepo working-tree changes are pre-existing and not this plan's concern — leave them untouched).
 
-**Deployment (out of plan scope, explicit user authorization):** build `GOOS=darwin GOARCH=arm64 go build -o bin/darwin-arm64/lattice-gateway ./cmd/lattice-gateway`, scp → `.new` → mv, `codesign -s - -f`, `launchctl bootout` + `bootstrap` (never kickstart), curl-verify with an image content part against the upgraded gateway. Tag sidecar install follows the rembg runbook (uv venv on M6 at `/Users/igor/lattice/deploy/tagger-venv`, plist sed for the three placeholders, bootout-guarded bootstrap).
+**Deployment (out of plan scope, explicit user authorization):** build `GOOS=darwin GOARCH=arm64 go build -o bin/darwin-arm64/lattice-gateway ./cmd/lattice-gateway`, scp → `.new` → mv, `codesign -s - -f`, `launchctl bootout` + `bootstrap` (never kickstart), curl-verify with an image content part against the upgraded gateway. Tag sidecar install follows the rembg runbook (uv venv on M6 at `/Users/<you>/lattice/deploy/tagger-venv`, plist sed for the three placeholders, bootout-guarded bootstrap).
