@@ -815,13 +815,8 @@ func (p *OllamaProvider) Execute(ctx context.Context, req Request) (*Response, e
 	// Context window is sized dynamically to the prompt: short prompts keep a
 	// small KV cache (low memory), while large agent prompts grow it. reasoning_effort
 	// raises the ceiling, and a configurable cap prevents the 131072-token default
-	// from bloating memory. handleInference already translated messages
-	// (content parts + tool_calls); direct callers (tests) need tool_calls
-	// normalization so we run ollamaMessages but ignore content-part errors
-	// (already validated upstream if coming from handleInference).
-	if msgs, err := ollamaMessages(req.Messages); err == nil {
-		req.Messages = msgs
-	}
+	// from bloating memory. handleInference translates messages (content parts
+	// + tool_calls) before calling here; production messages are already normalized.
 	ollamaReq := map[string]interface{}{
 		"model":    req.Model,
 		"messages": req.Messages,
@@ -945,12 +940,8 @@ func (p *OllamaProvider) ExecuteStream(ctx context.Context, req Request, w http.
 	targetURL, _ := url.Parse(p.Endpoint + "/api/chat")
 	maxTokens := resolveMaxTokens(req)
 
-	// handleInference already translated messages (content parts + tool_calls);
-	// direct callers (tests) need tool_calls normalization so we run ollamaMessages
-	// but ignore content-part errors (already validated upstream if coming from handleInference).
-	if msgs, err := ollamaMessages(req.Messages); err == nil {
-		req.Messages = msgs
-	}
+	// handleInference translates messages (content parts + tool_calls) before
+	// calling here; production messages are already normalized.
 	ollamaReq := map[string]interface{}{
 		"model":    req.Model,
 		"messages": req.Messages,
