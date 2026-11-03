@@ -20,6 +20,8 @@ __pycache__/
 !deploy/tagger-sidecar.py
 !deploy/dwpose-sidecar.py
 !deploy/dwpose_pipeline.py
+!deploy/rife-sidecar.py
+!deploy/rife_pipeline.py
 !deploy/hermes/plugins/image_gen/mflux/__init__.py
 !deploy/dsh/mcp-imagegen/server.py
 !deploy/dsh/mcp-imagegen/test_server.py

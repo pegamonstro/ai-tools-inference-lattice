@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lattice RIFE sidecar — macOS LaunchAgent template.
+
+  The frame-interpolation backend for img-gen's GIF keyframes source: anchor
+  frames in, (n-1)*multiplier+1 interpolated frames out (RIFE v4.9 ONNX, CPU).
+  Runs on the Mac (the MLX-adjacent ML host) behind RIFE_URL.
+
+  Like rembg/tagger/dwpose, this needs onnxruntime + Pillow in-process, so
+  RIFE_PYTHON is a uv venv interpreter (rife-venv/bin/python under the deploy
+  root). The rife49.onnx weights (~21 MB) live under RifeModelDir and load at
+  boot; CPU inference is ~0.1-0.5 s per intermediate frame at 512x512.
+
+  RIFE_BIND must be 0.0.0.0 so img-gen (on another host) can reach it over
+  the tailnet; unauthenticated, matching the mflux/rembg posture.
+  Port 8906 (8900 speech, 8901 esrgan, 8902 sdxl, 8903 rembg, 8904 tagger,
+  8905 dwpose).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lattice.rife</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__RIFE_PYTHON__</string>
+        <string>__REPO_ROOT__/deploy/rife-sidecar.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_ROOT__/deploy</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RIFE_BIND</key>
+        <string>0.0.0.0</string>
+        <key>RIFE_PORT</key>
+        <string>8906</string>
+        <key>RifeModelDir</key>
+        <string>__HOME__/lattice/models/rife</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/lattice-rife.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/lattice-rife.err.log</string>
+</dict>
+</plist>
