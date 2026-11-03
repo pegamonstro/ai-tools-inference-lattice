@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lattice DWPose sidecar — macOS LaunchAgent template.
+
+  The COCO-WholeBody pose extraction backend for img-gen's character kind:
+  base64 pose photos extract 133-keypoint skeletons (COCO-17 body subset)
+  that compose.PoseSkeleton renders into openpose ControlNet conditioning.
+  Runs on the Mac (the MLX-adjacent ML host) behind DWPOSE_URL.
+
+  Like rembg/tagger, this needs onnxruntime + opencv in-process, so
+  DWPose_PYTHON is a uv venv interpreter (dwpose-venv/bin/python under the
+  deploy root). The ONNX weights (~370 MB: yolox_l + dw-ll_ucoco_384) live
+  under DWPoseModelDir and load at boot; CPU inference is ~1-2 s per image.
+
+  DWPose_BIND must be 0.0.0.0 so img-gen (on another host) can reach it over
+  the tailnet; unauthenticated, matching the mflux/rembg posture.
+  Port 8905 (8900 speech, 8901 esrgan, 8902 sdxl, 8903 rembg, 8904 tagger).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lattice.dwpose</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__DWPose_PYTHON__</string>
+        <string>__REPO_ROOT__/deploy/dwpose-sidecar.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_ROOT__/deploy</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DWPose_BIND</key>
+        <string>0.0.0.0</string>
+        <key>DWPose_PORT</key>
+        <string>8905</string>
+        <key>DWPoseModelDir</key>
+        <string>__HOME__/lattice/models/dwpose</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/lattice-dwpose.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/lattice-dwpose.err.log</string>
+</dict>
+</plist>
