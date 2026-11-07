@@ -8,8 +8,9 @@ different text-encoder + VAE stack, so they load through stable-diffusion.cpp
 ``mflux-sidecar.py`` (single-flight, sync POST returning the b64 PNG plus
 write-then-respond persistence for mid-wait re-attach), so img-gen can treat
 both engines interchangeably. Only the modes the SDXL runtime supports are
-exposed: text2img (``/generate``) and img2img (``/edit``). Inpaint/fill/redux/pose
-are runtime features of the FLUX sidecar and intentionally absent here.
+exposed: text2img (``/generate``), img2img (``/edit``), and masked inpainting
+(``/fill`` — white = repaint, black = keep). Redux/pose remain FLUX-sidecar
+features and are intentionally absent here.
 
 Design notes:
   * The CLI is driven via subprocess; ``-o`` points straight at the persisted
@@ -54,6 +55,9 @@ Endpoints:
                     -> {image: b64, seed, width, height, seconds} | {error}
   POST /edit     -> same as /generate plus {init_image: b64, strength?}
                    (no conditioning keys — control/ip-adapter are generate-mode)
+  POST /fill     -> same as /generate plus {init_image: b64, mask: b64, strength?}
+                   masked img2img inpainting; strength is the masked region's
+                   denoise strength (0.1..1.0, default 1.0 = full repaint)
 
   GET  /result/<id> -> the finished generation's PNG (raw bytes, "image/png"),
                       404 when unknown — same re-attach semantics as mflux.
@@ -362,6 +366,11 @@ def run_generation(params: dict, state: dict) -> bytes:
             with open(init, "wb") as fh:
                 fh.write(base64.b64decode(params["init_image"]))
             cmd += ["--init-img", init, "--strength", str(params.get("strength", 0.4))]
+        if params.get("mask"):
+            mask = os.path.join(td, "mask.png")
+            with open(mask, "wb") as fh:
+                fh.write(base64.b64decode(params["mask"]))
+            cmd += ["--mask", mask]
         ctrl = params.get("control_net")
         if ctrl:
             ctl = os.path.join(td, "control.png")
@@ -456,7 +465,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/cancel":
             self._do_cancel()
             return
-        if path not in ("/generate", "/edit"):
+        if path not in ("/generate", "/edit", "/fill"):
             self._send_json(404, {"error": "not found"}); return
 
         try:
@@ -557,6 +566,21 @@ class Handler(BaseHTTPRequestHandler):
                 raise TypeError("init_image required")
             common["init_image"] = body["init_image"]
             common["strength"] = float(body.get("strength", 0.4))
+        if path == "/fill":
+            # Masked img2img (inpainting): white = repaint, black = keep. Full
+            # denoise of the masked region by default — /fill is "repaint that
+            # area", not /edit's gentle restyle.
+            if not body.get("init_image"):
+                raise TypeError("init_image required")
+            _b64_image(body["init_image"], "init_image")
+            if not body.get("mask"):
+                raise TypeError("mask required")
+            common["init_image"] = body["init_image"]
+            common["mask"] = _b64_image(body["mask"], "mask")
+            s = float(body.get("strength", 1.0))
+            if not 0.1 <= s <= 1.0:
+                raise ValueError(f"strength must be 0.1..1.0, got {s}")
+            common["strength"] = s
         return common
 
     def log_message(self, *args) -> None:  # quiet; the LaunchAgent captures stdout/stderr
