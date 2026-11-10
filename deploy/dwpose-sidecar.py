@@ -63,6 +63,35 @@ def get_sessions():
     return _states["det"], _states["pose"]
 
 
+# COCO-WholeBody-133 groups: face 23-90, left hand 91-111, right hand 112-132.
+HAND_GROUPS = (range(91, 112), range(112, 133))
+
+
+def hand_boxes(kps, conf_thr: float = 0.3, pad: float = 0.15) -> list[list[float]]:
+    """Normalized [x, y, w, h] boxes around detected hands (WholeBody hand
+    keypoints, padded), the region the auto hand-refine masks paint."""
+    boxes: list[list[float]] = []
+    if kps is None or kps.shape[0] < 133:
+        return boxes
+    for grp in HAND_GROUPS:
+        pts = [(float(kps[i, 0]), float(kps[i, 1]), float(kps[i, 2]))
+               for i in grp if kps[i, 2] >= conf_thr]
+        if not pts:
+            continue
+        xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        w = max(x1 - x0, 40.0)  # never a sliver: hands need a paintable region
+        h = max(y1 - y0, 40.0)
+        x0, x1 = cx - w / 2 * (1 + pad * 2), cx + w / 2 * (1 + pad * 2)
+        y0, y1 = cy - h / 2 * (1 + pad * 2), cy + h / 2 * (1 + pad * 2)
+        boxes.append([round(max(0.0, x0), 4), round(max(0.0, y0), 4),
+                      round(min(1.0, x1) - max(0.0, x0), 4),
+                      round(min(1.0, y1) - max(0.0, y0), 4)])
+    return boxes
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, code: int, obj: dict) -> None:
         body = json.dumps(obj).encode()
@@ -78,13 +107,14 @@ class Handler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "det_model": "yolox_l",
                 "pose_model": "dw-ll_ucoco_384",
+                "endpoints": ["/pose", "/hands"],
                 "session_ready": _states["pose"] is not None,
             })
             return
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
-        if self.path != "/pose":
+        if self.path not in ("/pose", "/hands"):
             self._send_json(404, {"error": "not found"})
             return
         try:
@@ -119,8 +149,19 @@ class Handler(BaseHTTPRequestHandler):
                     triplets += [float(kps[i, 0]), float(kps[i, 1]), float(kps[i, 2])]
             else:
                 triplets = [0.0, 0.0, 0.0] * 17
+            hands = hand_boxes(kps)
+            if self.path == "/hands":
+                self._send_json(200, {
+                    "boxes": hands,
+                    "width": int(w),
+                    "height": int(h),
+                    "seconds": round(time.time() - t0, 3),
+                    "person_count": len(boxes),
+                })
+                return
             self._send_json(200, {
                 "keypoints": triplets,
+                "hands": hands,
                 "width": int(w),
                 "height": int(h),
                 "seconds": round(time.time() - t0, 3),
