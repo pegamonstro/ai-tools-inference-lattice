@@ -136,11 +136,14 @@ faster" (yes) but "when and where to run it":
   alongside MLX as a second local engine is two resident runtimes; on 32 GB it
   is comfortable. The 43 % decode win is real but small next to the ~2.5× the
   M6's bandwidth gives for free.
-- **Provider shape.** MLX would plug into the existing `Provider` abstraction
+- **Provider shape.** MLX plugs into the existing `Provider` abstraction
   as an HTTP endpoint (an `mlx-lm` server or `vllm-mlx`), not embedded code —
   MLX is Python/Metal and cannot run inside the Go gateway. The gateway's
-  `providers` registry is currently hardcoded to `"ollama"`; adding MLX is a
-  second endpoint of the same shape.
+  `providers` registry is loaded from `LATTICE_GATEWAY_PROVIDERS` and already
+  supports kinds `ollama`, `mlx`, `mflux`/`sdxl`, and `speech`
+  (`cmd/lattice-gateway/providers.go`); MLX is one endpoint among those kinds
+  (see [`lattice-mlx-provider.md`](lattice-mlx-provider.md)). A future on-device
+  AFM kind is scoped separately in [`lattice-afm-provider.md`](lattice-afm-provider.md).
 - **Open question before building:** does MLX expose the M6 Neural Accelerators
   yet? If not, the MLX win on the M6 is *only* the decode-side runtime win,
   while prefill needs the Metal tensor API directly (P4).
